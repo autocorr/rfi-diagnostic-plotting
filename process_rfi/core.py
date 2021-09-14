@@ -56,6 +56,7 @@ class MetaData:
 
 class ExecutionBlock:
     prefix = "TRFI0004"
+    dpi = 300
 
     def __init__(self, sdm, overwrite=False):
         """
@@ -120,25 +121,93 @@ class ExecutionBlock:
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
 
-    def plot_crosspower_spectra_per_scan(self):
+    def plot_crosspower_spectra(self, field_name, scan_id, correlation,
+            corr_type="CC"):
         """
         Plot scalar-averaged cross-power spectra for each field, time
         averaging and creating a plot for each scan.
         """
+        corr_map = {"AC": "*&&&", "CC": "!*&&&"}
+        assert self.hann_path.exists()
+        assert corr_type in corr_map
+        antenna = corr_map[corr_type]
+        title = f"Field={field_name}; Scan={scan_id}; Pol={correlation}; {corr_type}"
+        plotfile = (
+                PATHS.plot /
+                f"{self.name}_{field_name}_{scan_id}_{correlation}_{corr_type}.png"
+        )
+        if plotfile.exists():
+            if self.keep_existing:
+                log_post(f"File exists, continuing: {plotfile}")
+                return
+            else:
+                log_post(f"Removing file: {plotfile}")
+                os.remove(str(plotfile))
+        log_post(f"-- Generating plot for: '{title}'")
+        plotms(
+                vis=str(self.hann_path),
+                xaxis="frequency",
+                yaxis="amp",
+                showgui=False,
+                # Data selection
+                selectdata=True,
+                antenna=antenna,
+                scan=str(scan_id),
+                correlation=correlation,
+                # Data averaging
+                averagedata=True,
+                scalar=True,
+                avgtime="99999",
+                avgbaseline=True,
+                # Figure properties
+                plotfile=str(plotfile),
+                dpi=self.dpi,
+                width=4*self.dpi,
+                height=3*self.dpi,
+                highres=True,
+                # Draw style
+                customsymbol=True,
+                symbolshape="circle",
+                symbolcolor="black",
+                symbolsize=2,
+                title=title,
+                showmajorgrid=True,
+                majorstyle="dash",
+        )
+
+    def plot_all_crosspower_spectra_per_scan(self):
         assert self.hann_path.exists()
         meta = MetaData(self.hann_path)
         for field_id in meta.fieldsforscans:
             field_name = meta.fieldnames[field_id]
             for scan_id in meta.scansforfields[str(field_id)]:
                 for correlation in ("LL", "RR"):
+                    for corr_type in ("CC", "AC"):
+                        self.plot_crosspower_spectra(
+                                field_name,
+                                scan_id,
+                                correlation,
+                                corr_type=corr_type,
+                        )
+
+    def plot_all_crosspower_spectra_per_field(self):
+        assert self.hann_path.exists()
+        meta = MetaData(self.hann_path)
+        for field_id in meta.fieldsforscans:
+            field_name = meta.fieldnames[field_id]
+            scansforfields = meta.scansforfields[str(field_id)]
+            all_scans_str = ",".join(str(n) for n in scansforfields)
+            for correlation in ("LL", "RR"):
+                for corr_type, antenna in (("AC", "*&&&"), ("CC", "!*&&&")):
+                    title = f"Field={field_name}; Scan={all_scans_str}; Pol={correlation}; {corr_type}"
                     plotfile = (
                             PATHS.plot /
-                            f"{self.name}_{field_name}_{scan_id}_{correlation}.png"
+                            f"{self.name}_{field_name}_avg_{correlation}_{corr_type}.png"
                     )
-                    title = f"Field={field_name}; Scan={scan_id}; Corr={correlation}"
                     if plotfile.exists():
                         if self.keep_existing:
                             log_post(f"File exists, continuing: {plotfile}")
+                            continue
                         else:
                             log_post(f"Removing file: {plotfile}")
                             os.remove(str(plotfile))
@@ -150,81 +219,37 @@ class ExecutionBlock:
                             showgui=False,
                             # Data selection
                             selectdata=True,
-                            scan=str(scan_id),
+                            antenna=antenna,
+                            scan=all_scans_str,
                             correlation=correlation,
                             # Data averaging
                             averagedata=True,
                             scalar=True,
                             avgtime="99999",
+                            avgscan=True,
                             avgbaseline=True,
                             # Figure properties
                             plotfile=str(plotfile),
-                            dpi=600,
+                            dpi=self.dpi,
+                            width=4*self.dpi,
+                            height=3*self.dpi,
                             highres=True,
                             # Draw style
                             customsymbol=True,
-                            symbolcolor="black",
                             symbolshape="circle",
-                            symbolsize=1,
+                            symbolcolor="black",
+                            symbolsize=2,
                             title=title,
                             showmajorgrid=True,
                             majorstyle="dash",
                     )
-                    return  # XXX
-
-    def plot_crosspower_spectra_field_avg(self):
-        """
-        Plot scalar-averaged cross-power spectra for each field, time
-        averaged over all scans with that field name.
-        """
-        assert self.hann_path.exists()
-        meta = MetaData(self.hann_path)
-        for field_id in meta.fieldsforscans:
-            field_name = meta.fieldnames[field_id]
-            scansforfields = meta.scansforfields[str(field_id)]
-            all_scans_str = ",".join(scansforfields)
-            for correlation in ("LL", "RR"):
-                plotfile = PATHS.plot / f"{self.name}_{field_name}_avg_{correlation}.png"
-                title = f"Field={field_name}; Scan={all_scans_str}; Corr={correlation}"
-                log_post(f"-- Generating plot for: '{title}'")
-                if plotfile.exists():
-                    if self.keep_existing:
-                        log_post(f"File exists, continuing: {plotfile}")
-                    else:
-                        log_post(f"Removing file: {plotfile}")
-                        os.remove(str(plotfile))
-                log_post(f"-- Generating plot for: '{title}'")
-                plotms(
-                        vis=str(self.hann_path),
-                        xaxis="frequency",
-                        yaxis="amp",
-                        showgui=False,
-                        # Data selection
-                        selectdata=True,
-                        scan=all_scans_str,
-                        correlation=correlation,
-                        # Data averaging
-                        averagedata=True,
-                        scalar=True,
-                        avgscan=True,
-                        avgtime="99999",
-                        avgbaseline=True,
-                        # Figure properties
-                        plotfile=str(plotfile),
-                        dpi=600,
-                        highres=True,
-                        # Draw style
-                        customsymbol=True,
-                        symbolshape='circle',
-                        symbolsize=1,
-                        title=title,
-                )
-                return  # XXX
+                    return
 
     def process(self):
         self.create_ms()
         self.hanning_smooth()
-        self.plot_crosspower_spectra()
+        self.plot_all_crosspower_spectra_per_scan()
+        self.plot_all_crosspower_spectra_per_field()
 
 
 def get_all_sdm_filenames():
