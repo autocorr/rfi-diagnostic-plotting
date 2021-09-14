@@ -8,13 +8,13 @@ Getting started
 ---------------
 First, clone or download this repository, copy the ``process.cfg`` file into
 the directory where CASA is to be run, and edit the paths accordingly.  Please
-ensure that the ``VIS_DIR`` is set to the directory where the ASDM files are
+ensure that the ``SDM_DIR`` is set to the directory where the ASDM files are
 stored. Then start CASA and run:
 
 .. code-block:: python
 
    import sys
-   sys.path.append("/<PATH>/<TO>/process_and_plot_rfi")
+   sys.path.append("/<PATH>/<TO>/rfi-diagnostic-plotting")
    from process_rfi.core import process_all_executions
    process_all_executions(overwrite=False)
 
