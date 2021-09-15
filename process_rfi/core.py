@@ -220,13 +220,21 @@ class ExecutionBlock:
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
+    def plot_all_waterfall(self):
+        assert self.sdm_path.exists()
+        corr_types = ("cross", "auto")
+        for sdm in self.sdm.scans():
+            for corr in corr_types:
+                scan_id = int(scan.ix)
+                self.plot_waterfall(scan_id, corr=corr)
+
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
-            corr_type="CC"):
+            corr_type="cross"):
         """
         Plot scalar-averaged cross-power spectra for each field, time
         averaging and creating a plot for each scan.
         """
-        corr_map = {"AC": "*&&&", "CC": "!*&&&"}
+        corr_map = {"auto": "*&&&", "cross": "!*&&&"}
         assert self.hann_path.exists()
         assert corr_type in corr_map
         antenna = corr_map[corr_type]
@@ -281,7 +289,7 @@ class ExecutionBlock:
             field_name = meta.fieldnames[field_id]
             for scan_id in meta.scansforfields[str(field_id)]:
                 for correlation in ("LL", "RR"):
-                    for corr_type in ("CC", "AC"):
+                    for corr_type in ("cross", "auto"):
                         self.plot_crosspower_spectra(
                                 field_name,
                                 scan_id,
@@ -297,7 +305,7 @@ class ExecutionBlock:
             scansforfields = meta.scansforfields[str(field_id)]
             all_scans_str = ",".join(str(n) for n in scansforfields)
             for correlation in ("LL", "RR"):
-                for corr_type, antenna in (("AC", "*&&&"), ("CC", "!*&&&")):
+                for corr_type, antenna in (("auto", "*&&&"), ("cross", "!*&&&")):
                     title = f"Field={field_name}; Scan={all_scans_str}; Pol={correlation}; {corr_type}"
                     plotfile = (
                             PATHS.plot /
