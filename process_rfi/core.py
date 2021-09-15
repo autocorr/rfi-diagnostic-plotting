@@ -223,9 +223,9 @@ class ExecutionBlock:
     def plot_all_waterfall(self):
         assert self.sdm_path.exists()
         corr_types = ("cross", "auto")
-        for sdm in self.sdm.scans():
+        for scan in self.sdm.scans():
             for corr in corr_types:
-                scan_id = int(scan.ix)
+                scan_id = int(scan.idx)
                 self.plot_waterfall(scan_id, corr=corr)
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
