@@ -243,7 +243,6 @@ class ExecutionBlock:
                             showmajorgrid=True,
                             majorstyle="dash",
                     )
-                    return
 
     def process(self):
         self.create_ms()
