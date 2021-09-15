@@ -4,7 +4,11 @@ import os
 import shutil
 from pathlib import Path
 
-from process_rfi import PATHS
+import sdmpy
+import numpy as np
+from matplotlib import pyplot as plt
+from matplotlib import (patheffects, colors)
+from matplotlib.ticker import AutoMinorLocator
 
 from casatasks import (
         casalog,
@@ -15,6 +19,16 @@ from casatasks import (
 )
 from casatools import msmetadata
 from casaplotms import plotms
+
+from process_rfi import PATHS
+
+
+# Matplotlib configuration settings
+plt.rc("text", usetex=True)
+plt.rc("font", size=10, family="serif")
+plt.rc("xtick", direction="out")
+plt.rc("ytick", direction="out")
+plt.ioff()
 
 
 def log_post(msg, priority="INFO"):
@@ -36,6 +50,16 @@ def add_ext(path, ext):
     return path.parent / f"{path.name}{ext}"
 
 
+def savefig(outname, dpi=300, relative=True, overwrite=True):
+    outpath = PATHS.plot / outname if relative else Path(outname)
+    if outpath.exists() and not overwrite:
+        print(f"Figure exists, continuing: {outpath}")
+    else:
+        print(f"Figure saved to: {outpath}")
+        plt.savefig(str(outpath), dpi=dpi)
+        plt.close("all")
+
+
 class MetaData:
     def __init__(self, vis):
         self.vis = Path(vis)
@@ -54,15 +78,63 @@ class MetaData:
             msmd.done()
 
 
+class DynamicSpectrum:
+    def __init__(self, scan, corr="cross"):
+        """
+        Parameters
+        ----------
+        scan : sdmpy.Scan
+        corr : str
+            Correlation type, valid identifiers ("cross", "auto")
+
+        Attributes
+        ----------
+        data : np.ndarray
+        shape : tuple
+        freq : nd.ndarray
+        time : np.ndarray
+        """
+        assert corr in ("cross", "auto")
+        self.scan = scan
+        self.corr = corr
+        # Read data from BDF, take abs, and reshape for convenience
+        data = np.abs(scan.bdf.get_data(type=corr))
+        s = data.shape
+        data = data.reshape((s[0], s[1], s[2]*s[4], s[5]))
+        # Rudimentary bandpass and normalization
+        data_bp = np.median(data, axis=0, keepdims=True)  # over time
+        data_bl = np.mean(data_bp, axis=2, keepdims=True)  # over freq
+        data /= data_bl
+        self.data = data
+        self.shape = data.shape
+        # Time and frequency
+        freq = scan.freqs().ravel() / 1e6  # MHz
+        time = scan.times()
+        time = (time - time[0]) * 86400.0  # seconds
+        self.freq = freq
+        self.time = time
+
+    def get_spec(self, pol=0):
+        assert pol in (0, 1)
+        spec = self.data.max(axis=1)[:,:,pol]
+        extent = [
+                self.freq[ 0],
+                self.freq[-1],
+                self.time[ 0],
+                self.time[-1],
+        ]
+        return spec, extent
+
+
 class ExecutionBlock:
     prefix = "TRFI0004"
     dpi = 300
 
-    def __init__(self, sdm, overwrite=False):
+    def __init__(self, sdm_name, overwrite=False):
         """
         Parameters
         ----------
-        sdm : str
+        sdm_name : str
             Filename of the ASDM file for the execution to be processed.
         overwrite : bool, default False
             Overwrite MS files and plots if they exist. If set to ``False``,
@@ -71,11 +143,15 @@ class ExecutionBlock:
         Attributes
         ----------
         prefix : str
+        sdm : sdmpy.SDM
+        sdm_path : pathlib.Path
+        vis_path : pathlib.Path
         """
-        self.name = sdm
-        self.sdm_path = Path(PATHS.sdm / sdm)
+        self.name = sdm_name
+        self.sdm_path = Path(PATHS.sdm / sdm_name)
         assert self.sdm_path.exists()
-        vis_path = Path(PATHS.vis / sdm)
+        self.sdm = sdmpy.SDM(str(self.sdm_path), use_xsd=False)
+        vis_path = Path(PATHS.vis / sdm_name)
         self.vis_path = add_ext(vis_path, ".ms")
         self.hann_path = add_ext(vis_path, ".ms.hann")
         self.overwrite = overwrite
@@ -120,6 +196,29 @@ class ExecutionBlock:
             call_hanning()
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
+
+    def plot_waterfall(self, scannum, corr="cross", outname=None):
+        """
+        Parameters
+        ----------
+        scannum : int
+        corr : str, default "cross"
+        outname : (str, None)
+        """
+        outname = f"{self.name}_{scannum}_{corr}" if outname is None else outname
+        scan = self.sdm.scan(scannum)
+        dyna = DynamicSpectrum(scan, corr=corr)
+        fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(4, 4))
+        for pol, ax in zip(range(2), axes):
+            spec, extent = dyna.get_spec(pol=pol)
+            ax.imshow(np.log10(spec), cmap="plasma", extent=extent, aspect="auto")
+            ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+            txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction", fontsize=12)
+            txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
+        axes[1].set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+        axes[0].set_title(f"Field={scan.source}; Scan={scannum}")
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="CC"):
@@ -272,8 +371,8 @@ def process_all_executions(overwrite=False):
         function should be safe to run simply whenever new data is added.
     """
     sdm_names = get_all_sdm_filenames()
-    for sdm in sdm_names:
-        eb = ExecutionBlock(sdm)
+    for name in sdm_names:
+        eb = ExecutionBlock(name)
         eb.process()
 
 

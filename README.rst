@@ -21,8 +21,8 @@ stored. Then start CASA and run:
 
 License
 -------
-The pipeline is authored by Brian Svoboda and Urvashi Rao. The code and
-documentation is released under the MIT License. A copy of the license is
-supplied in the LICENSE file.
+The pipeline is authored by Brian Svoboda, Paul Demorest, and Urvashi Rao. The
+code and documentation is released under the MIT License. A copy of the license
+is supplied in the LICENSE file.
 
 

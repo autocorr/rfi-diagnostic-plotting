@@ -1,0 +1,6 @@
+casaplotms
+casatasks
+casatools
+matplotlib
+numpy
+sdmpy
