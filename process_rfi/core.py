@@ -216,7 +216,7 @@ class ExecutionBlock:
             txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction", fontsize=12)
             txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
         axes[1].set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-        axes[0].set_title(f"Field={scan.source}; Scan={scannum}")
+        axes[0].set_title(f"Field={scan.source}; Scan={scannum}; {corr.capitalize()}")
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
