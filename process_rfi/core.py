@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import copy
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,9 @@ plt.rc("font", size=10, family="serif")
 plt.rc("xtick", direction="out")
 plt.rc("ytick", direction="out")
 plt.ioff()
+
+CMAP = copy.copy(plt.cm.get_cmap("plasma"))
+CMAP.set_bad("0.5", 1.0)
 
 
 def log_post(msg, priority="INFO"):
@@ -104,6 +108,8 @@ class DynamicSpectrum:
         # Rudimentary bandpass and normalization
         data_bp = np.median(data, axis=0, keepdims=True)  # over time
         data_bl = np.mean(data_bp, axis=2, keepdims=True)  # over freq
+        data_bl[data_bl == 0.0] = np.nan
+        data[data == 0.0] = np.nan
         data /= data_bl
         self.data = data
         self.shape = data.shape
@@ -116,7 +122,7 @@ class DynamicSpectrum:
 
     def get_spec(self, pol=0):
         assert pol in (0, 1)
-        spec = self.data.max(axis=1)[:,:,pol]
+        spec = np.nanmax(self.data, axis=1)[:,:,pol]
         extent = [
                 self.freq[ 0],
                 self.freq[-1],
@@ -211,7 +217,7 @@ class ExecutionBlock:
         fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(4, 4))
         for pol, ax in zip(range(2), axes):
             spec, extent = dyna.get_spec(pol=pol)
-            ax.imshow(np.log10(spec), cmap="plasma", extent=extent, aspect="auto")
+            ax.imshow(np.log10(spec), cmap=CMAP, extent=extent, aspect="auto")
             ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
             txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction", fontsize=12)
             txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
