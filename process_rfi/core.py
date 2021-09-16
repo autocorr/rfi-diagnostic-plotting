@@ -111,6 +111,7 @@ class DynamicSpectrum:
         data_bl[data_bl == 0.0] = np.nan
         data[data == 0.0] = np.nan
         data /= data_bl
+        # shape -> (time, baseline/antenna, frequency, polariation)
         self.data = data
         self.shape = data.shape
         # Time and frequency
@@ -120,16 +121,23 @@ class DynamicSpectrum:
         self.freq = freq
         self.time = time
 
-    def get_spec(self, pol=0):
-        assert pol in (0, 1)
-        spec = np.nanmax(self.data, axis=1)[:,:,pol]
-        extent = [
+    @property
+    def extent(self):
+        return [
                 self.freq[ 0],
                 self.freq[-1],
                 self.time[ 0],
                 self.time[-1],
         ]
-        return spec, extent
+
+    def get_all_spec(self, pol=0):
+        assert pol in (0, 1)
+        spec = self.data[...,pol]
+        return spec
+
+    def get_max_spec(self, pol=0):
+        spec = self.get_all_spec(pol=pol)
+        return np.nanmax(spec, axis=1)
 
 
 class ExecutionBlock:
@@ -203,7 +211,7 @@ class ExecutionBlock:
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
 
-    def plot_waterfall(self, scannum, corr="cross", outname=None):
+    def plot_waterfall_array_avg(self, scannum, corr="cross", outname=None):
         """
         Parameters
         ----------
@@ -211,18 +219,52 @@ class ExecutionBlock:
         corr : str, default "cross"
         outname : (str, None)
         """
-        outname = f"{self.name}_{scannum}_{corr}" if outname is None else outname
+        outname = f"{self.name}_S{scannum}_{corr}" if outname is None else outname
         scan = self.sdm.scan(scannum)
         dyna = DynamicSpectrum(scan, corr=corr)
-        fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(4, 4))
+        fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
+                figsize=(4, 4))
         for pol, ax in zip(range(2), axes):
-            spec, extent = dyna.get_spec(pol=pol)
-            ax.imshow(np.log10(spec), cmap=CMAP, extent=extent, aspect="auto")
+            spec = dyna.get_max_spec(pol=pol)
+            ax.imshow(np.log10(spec), cmap=CMAP, extent=dyna.extent, aspect="auto")
             ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
-            txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction", fontsize=12)
+            txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction",
+                    fontsize=12)
             txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
         axes[1].set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
         axes[0].set_title(f"Field={scan.source}; Scan={scannum}; {corr.capitalize()}")
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_waterfall_auto_grid(self, scannum, pol=0, outname=None):
+        """
+        Parameters
+        ----------
+        scannum : int
+        pol : int, default 0
+        outname : (str, None)
+        """
+        outname = (
+                f"{self.name}_S{scannum}_P{pol}_all_autos"
+                if outname is None else outname
+        )
+        scan = self.sdm.scan(scannum)
+        dyna = DynamicSpectrum(scan, corr="auto")
+        spec = dyna.get_all_spec(pol=pol)
+        fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
+                figsize=(8.5, 6.3))
+        for (ant_ix, ant_name), ax in zip(enumerate(scan.antennas), axes.flatten()):
+            ant_spec = spec[:,ant_ix,:]
+            ax.imshow(np.log10(ant_spec), cmap=CMAP, extent=dyna.extent, aspect="auto")
+            txt = ax.annotate(ant_name, xy=(0.8, 0.85), xycoords="axes fraction",
+                    fontsize=10)
+            txt.set_path_effects([patheffects.withStroke(linewidth=3.5, foreground="w")])
+            if ax.is_last_row():
+                ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+            if ax.is_first_col():
+                ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+        axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
+        axes[-1][-1].set_visible(False)
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
@@ -232,7 +274,9 @@ class ExecutionBlock:
         for scan in self.sdm.scans():
             for corr in corr_types:
                 scan_id = int(scan.idx)
-                self.plot_waterfall(scan_id, corr=corr)
+                self.plot_waterfall_array_avg(scan_id, corr=corr)
+                for pol in (0, 1):
+                    self.plot_waterfall_auto_grid(scannum, pol=pol)
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="cross"):
