@@ -5,12 +5,12 @@ import copy
 import shutil
 from pathlib import Path
 
-import sdmpy
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import (patheffects, colors)
 from matplotlib.ticker import AutoMinorLocator
 
+import sdmpy
 from casatasks import (
         casalog,
         hanningsmooth,
@@ -20,6 +20,7 @@ from casatasks import (
 )
 from casatools import msmetadata
 from casaplotms import plotms
+from astropy import units as u
 
 from process_rfi import PATHS
 
@@ -33,6 +34,21 @@ plt.ioff()
 
 CMAP = copy.copy(plt.cm.get_cmap("plasma"))
 CMAP.set_bad("0.5", 1.0)
+
+
+SDM_NAME_MAP = {
+        "TRFI0004_sb40126827_1_1.59466.78501478009":                "0.1",
+        "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333":  "1.1",
+        "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625":   "1.2",
+        "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964": "1.3",
+        "TRFI0004_sb40134306_2_1_20210915_1930.59472.809315266204": "1.4",
+        "TRFI0004_sb40134306_2_1_20210916_1200.59473.49042935185":  "2.1",
+        "TRFI0004_sb40134306_2_1_20210916_1430.59473.60329060185":  "2.2",
+        "TRFI0004_sb40134306_2_1_20210916_1615.59473.67476782408":  "2.3",
+        "TRFI0004_sb40134306_2_1_20210916_1845.59473.77818979167":  "2.4",
+        "TRFI0004_sb40134306_2_1_20210916_2100.59473.87321814815":  "2.5",
+        "TRFI0004_sb40134306_2_1_20210917_1300.59474.53013979166":  "3.1",
+}
 
 
 def log_post(msg, priority="INFO"):
@@ -82,32 +98,94 @@ class MetaData:
             msmd.done()
 
 
+def scan_data_to_xarray(scan, corr="cross"):
+    import xarray
+    if corr == "cross":
+        array_dim = "baseline"
+        array_coord = [f"{a1}@{a2}" for a1, a2 in scan.baselines]
+    elif corr == "auto":
+        array_dim = "antenna"
+        array_coord = scan.antennas
+    else:
+        raise ValueError(f"Invalid corr={corr}")
+    # shape -> (t, b/a, s, b, c, p); note b/a depends on corr
+    data = scan.bdf.get_data(type=corr)
+    s = data.shape
+    # shape -> (t, b/a, s*b*c, p); note b=bin has length 1
+    data = data.reshape(s[0], s[1], s[2]*s[3]*s[4], s[5])
+    # Get axis label information
+    times = scan.times()
+    times = (times - times[0]) * u.day.to("s")
+    freqs = scan.freqs().ravel() / 1e6  # MHz
+    pols = scan.bdf.spws[0].pols(type=corr)
+    xarr = xarray.DataArray(
+            data,
+            dims=(
+                    "time",
+                    array_dim,
+                    "frequency",
+                    "polarization",
+            ),
+            coords={
+                    "time": times,
+                    array_dim: array_coord,
+                    "frequency": freqs,
+                    "polarization": pols,
+            },
+            attrs=dict(
+                    time_unit="sec",
+                    frequency_unit="MHz",
+                    startMJD=times[0]*u.day.to("s"),
+            ),
+    )
+    return xarr
+
 class DynamicSpectrum:
-    def __init__(self, scan, corr="cross"):
+    def __init__(self, scan, corr="cross", uvmax=None):
         """
         Parameters
         ----------
         scan : sdmpy.Scan
         corr : str
             Correlation type, valid identifiers ("cross", "auto")
+        uvmax : number, None
+            Limit by a maximum *uv*-distance in meters. If `None`, use all values.
 
         Attributes
         ----------
         data : np.ndarray
         shape : tuple
+            (time, baseline/antenna, spw*channel, polarization)
         freq : nd.ndarray
         time : np.ndarray
         """
         assert corr in ("cross", "auto")
         self.scan = scan
         self.corr = corr
+        self.uvmax = uvmax
+        if corr == "auto" and uvmax is not None:
+            raise ValueError("corr must be 'cross' to use `uvmax` parameter.")
         # Read data from BDF, take abs, and reshape for convenience
+        # shape -> (t, b/a, s, b, c, p)
         data = np.abs(scan.bdf.get_data(type=corr))
         s = data.shape
-        data = data.reshape((s[0], s[1], s[2]*s[4], s[5]))
+        # shape -> (t, b/a, s*b*c, p); note b=bin has length 1
+        data = data.reshape(s[0], s[1], s[2]*s[3]*s[4], s[5])
+        if uvmax is not None:
+            assert uvmax > 0
+            # shape.T -> (U, b); note U/uvw coordinate has length 3
+            uvw = sdmpy.calib.uvw(
+                    scan.startMJD,
+                    scan.coordinates,
+                    scan.positions,
+                    method="astropy",
+            ).transpose()
+            uvdist = np.sqrt(uvw[0]**2 + uvw[1]**2)
+            uvdist_mask = uvdist > uvmax
+            data[:,uvdist_mask,:,:] = np.nan
         # Rudimentary bandpass and normalization
-        data_bp = np.median(data, axis=0, keepdims=True)  # over time
-        data_bl = np.mean(data_bp, axis=2, keepdims=True)  # over freq
+        data_bp = np.nanmedian(data, axis=0, keepdims=True)  # over time
+        data_bl = np.nanmean(data_bp, axis=2, keepdims=True)  # over freq
         data_bl[data_bl == 0.0] = np.nan
         data[data == 0.0] = np.nan
         data /= data_bl
@@ -157,6 +235,7 @@ class ExecutionBlock:
         Attributes
         ----------
         prefix : str
+        run_id : str
         sdm : sdmpy.SDM
         sdm_path : pathlib.Path
         vis_path : pathlib.Path
@@ -169,6 +248,10 @@ class ExecutionBlock:
         self.vis_path = add_ext(vis_path, ".ms")
         self.hann_path = add_ext(vis_path, ".ms.hann")
         self.overwrite = overwrite
+        try:
+            self.run_id = SDM_NAME_MAP[sdm_name]
+        except KeyError:
+            raise RuntimeError(f"SDM name not in `SDM_NAME_MAP`: {sdm_name}")
 
     @property
     def keep_existing(self):
@@ -211,15 +294,21 @@ class ExecutionBlock:
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
 
-    def plot_waterfall_array_avg(self, scannum, corr="cross", outname=None):
+    def plot_waterfall_array_max(self, scannum, corr="cross", uvmax=None,
+            outname=None):
         """
         Parameters
         ----------
         scannum : int
         corr : str, default "cross"
-        outname : (str, None)
+        uvmax : number, None
+        outname : str, None
         """
-        outname = f"{self.name}_S{scannum}_{corr}" if outname is None else outname
+        outname = f"D{self.run_id}_{scannum}_{corr}" if outname is None else outname
+        outname += '' if uvmax is None else f"_uvmax{uvmax}"
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
         scan = self.sdm.scan(scannum)
         dyna = DynamicSpectrum(scan, corr=corr)
         fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
@@ -232,7 +321,7 @@ class ExecutionBlock:
                     fontsize=12)
             txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
         axes[1].set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-        axes[0].set_title(f"Field={scan.source}; Scan={scannum}; {corr.capitalize()}")
+        axes[0].set_title(f"{self.run_id} Field={scan.source}; Scan={scannum}; {corr.capitalize()}")
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
@@ -245,9 +334,12 @@ class ExecutionBlock:
         outname : (str, None)
         """
         outname = (
-                f"{self.name}_S{scannum}_P{pol}_all_autos"
+                f"D{self.run_id}_S{scannum}_P{pol}_all_autos"
                 if outname is None else outname
         )
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
         scan = self.sdm.scan(scannum)
         dyna = DynamicSpectrum(scan, corr="auto")
         spec = dyna.get_all_spec(pol=pol)
@@ -270,13 +362,14 @@ class ExecutionBlock:
 
     def plot_all_waterfall(self):
         assert self.sdm_path.exists()
+        log_post(f"-- Creating all waterfall plots for: {self.name}")
         corr_types = ("cross", "auto")
         for scan in self.sdm.scans():
             for corr in corr_types:
                 scan_id = int(scan.idx)
-                self.plot_waterfall_array_avg(scan_id, corr=corr)
+                self.plot_waterfall_array_max(scan_id, corr=corr)
                 for pol in (0, 1):
-                    self.plot_waterfall_auto_grid(scannum, pol=pol)
+                    self.plot_waterfall_auto_grid(scan_id, pol=pol)
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="cross"):
@@ -288,10 +381,10 @@ class ExecutionBlock:
         assert self.hann_path.exists()
         assert corr_type in corr_map
         antenna = corr_map[corr_type]
-        title = f"Field={field_name}; Scan={scan_id}; Pol={correlation}; {corr_type}"
+        title = f"{self.run_id} Field={field_name}; Scan={scan_id}; Pol={correlation}; {corr_type}"
         plotfile = (
                 PATHS.plot /
-                f"{self.name}_{field_name}_{scan_id}_{correlation}_{corr_type}.png"
+                f"D{self.run_id}_{field_name}_{scan_id}_{correlation}_{corr_type}.png"
         )
         if plotfile.exists():
             if self.keep_existing:
@@ -356,10 +449,10 @@ class ExecutionBlock:
             all_scans_str = ",".join(str(n) for n in scansforfields)
             for correlation in ("LL", "RR"):
                 for corr_type, antenna in (("auto", "*&&&"), ("cross", "!*&&&")):
-                    title = f"Field={field_name}; Scan={all_scans_str}; Pol={correlation}; {corr_type}"
+                    title = f"{self.run_id} Field={field_name}; Scan={all_scans_str}; Pol={correlation}; {corr_type}"
                     plotfile = (
                             PATHS.plot /
-                            f"{self.name}_{field_name}_avg_{correlation}_{corr_type}.png"
+                            f"D{self.run_id}_{field_name}_avg_{correlation}_{corr_type}.png"
                     )
                     if plotfile.exists():
                         if self.keep_existing:
@@ -430,7 +523,17 @@ def process_all_executions(overwrite=False):
     """
     sdm_names = get_all_sdm_filenames()
     for name in sdm_names:
-        eb = ExecutionBlock(name)
+        eb = ExecutionBlock(name, overwrite=overwrite)
         eb.process()
+
+
+def make_all_sdm_plots(overwrite=False):
+    """
+    Create all plots that only require reading the SDM and not MS creation.
+    """
+    sdm_names = get_all_sdm_filenames()
+    for name in sdm_names:
+        eb = ExecutionBlock(name, overwrite=overwrite)
+        eb.plot_all_waterfall()
 
 
