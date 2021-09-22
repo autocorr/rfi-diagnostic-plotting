@@ -425,7 +425,7 @@ class ExecutionBlock:
         outname : str, None
         **dyna_kwargs
         """
-        outname = f"D{self.run_id}_{scan_id}_{corr}" if outname is None else outname
+        outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
@@ -458,7 +458,7 @@ class ExecutionBlock:
         outname : str, None
         **dyna_kwargs
         """
-        outname = f"D{self.run_id}_{band}_{corr}" if outname is None else outname
+        outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
@@ -578,9 +578,9 @@ class ExecutionBlock:
             for corr in corr_types:
                 scan_id = int(scan.idx)
                 self.plot_waterfall_array_max(scan_id, corr=corr)
-                for pol in (0, 1):
-                    self.plot_waterfall_cross_grid(scan_id, pol=pol)
-                    self.plot_waterfall_auto_grid(scan_id, pol=pol)
+            for pol in (0, 1):
+                self.plot_waterfall_cross_grid(scan_id, pol=pol)
+                self.plot_waterfall_auto_grid(scan_id, pol=pol)
         for band in list("abcd"):
             self.plot_waterfall_array_max_groups(band)
 
