@@ -4,13 +4,18 @@ import os
 import copy
 import shutil
 from pathlib import Path
+from itertools import compress
+from dataclasses import dataclass
 
 import numpy as np
 from matplotlib import pyplot as plt
-from matplotlib import (patheffects, colors)
+from matplotlib import (gridspec, patheffects, colors)
 from matplotlib.ticker import AutoMinorLocator
 
 import sdmpy
+from astropy import units as u
+from scipy.signal import fftconvolve
+from scipy.ndimage import median_filter
 from casatasks import (
         casalog,
         hanningsmooth,
@@ -20,7 +25,6 @@ from casatasks import (
 )
 from casatools import msmetadata
 from casaplotms import plotms
-from astropy import units as u
 
 from process_rfi import PATHS
 
@@ -32,23 +36,66 @@ plt.rc("xtick", direction="out")
 plt.rc("ytick", direction="out")
 plt.ioff()
 
-CMAP = copy.copy(plt.cm.get_cmap("plasma"))
+CMAP = copy.copy(plt.cm.get_cmap("magma"))
 CMAP.set_bad("0.5", 1.0)
 
 
-SDM_NAME_MAP = {
-        "TRFI0004_sb40126827_1_1.59466.78501478009":                "0.1",
-        "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333":  "1.1",
-        "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625":   "1.2",
-        "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964": "1.3",
-        "TRFI0004_sb40134306_2_1_20210915_1930.59472.809315266204": "1.4",
-        "TRFI0004_sb40134306_2_1_20210916_1200.59473.49042935185":  "2.1",
-        "TRFI0004_sb40134306_2_1_20210916_1430.59473.60329060185":  "2.2",
-        "TRFI0004_sb40134306_2_1_20210916_1615.59473.67476782408":  "2.3",
-        "TRFI0004_sb40134306_2_1_20210916_1845.59473.77818979167":  "2.4",
-        "TRFI0004_sb40134306_2_1_20210916_2100.59473.87321814815":  "2.5",
-        "TRFI0004_sb40134306_2_1_20210917_1300.59474.53013979166":  "3.1",
+SCANS_BY_BAND = {
+        # (off, off, on)
+        # NOTE scan 7 for power-up in Band D
+        "a": (1,  6,  9),
+        "b": (2, 10, 12),
+        "c": (3, 11, 13),
+        "d": (4,  5,  8),
 }
+
+SDM_FROM_RUN = {
+         "0.1": "TRFI0004_sb40126827_1_1.59466.78501478009",
+         "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
+         "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
+         "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
+         "1.4": "TRFI0004_sb40134306_2_1_20210915_1930.59472.809315266204",
+         "2.1": "TRFI0004_sb40134306_2_1_20210916_1200.59473.49042935185",
+         "2.2": "TRFI0004_sb40134306_2_1_20210916_1430.59473.60329060185",
+         "2.3": "TRFI0004_sb40134306_2_1_20210916_1615.59473.67476782408",
+         "2.4": "TRFI0004_sb40134306_2_1_20210916_1845.59473.77818979167",
+         "2.5": "TRFI0004_sb40134306_2_1_20210916_2100.59473.87321814815",
+         "3.1": "TRFI0004_sb40134306_2_1_20210917_1300.59474.53013979166",
+}
+RUN_FROM_SDM = {v: k for k, v in SDM_FROM_RUN.items()}
+
+LOCATIONS = {
+         "0.1": "N/A",
+         "1.1": "VLA Site",
+         "1.2": "Route 60",
+         "1.3": "Magdalena",
+         "1.4": "Clark Field",
+         "2.1": "DSOC",
+         "2.2": "Alamo Pos. 1",
+         "2.3": "Almao Pos. 2",
+         "2.4": "Datil",
+         "2.5": "Pie Town",
+         "3.1": "?",
+}
+assert all([k in SDM_FROM_RUN for k in LOCATIONS])
+
+
+@dataclass
+class SdmInfo:
+    sdm: str
+    run_id: str
+
+    @property
+    def location(self):
+        return LOCATIONS[self.run_id]
+
+    @property
+    def run_id(self):
+        return RUN_FROM_SDM[self.sdm]
+
+    @property
+    def sdm_path(self):
+        return PATHS.sdm / self.sdm
 
 
 def log_post(msg, priority="INFO"):
@@ -140,16 +187,27 @@ def scan_data_to_xarray(scan, corr="cross"):
     )
     return xarr
 
+
 class DynamicSpectrum:
-    def __init__(self, scan, corr="cross", uvmax=None):
+    def __init__(self, scan, corr="cross", apply_bandpass=True, uvmax=700,
+            mean_filter=None):
         """
         Parameters
         ----------
         scan : sdmpy.Scan
         corr : str
             Correlation type, valid identifiers ("cross", "auto")
-        uvmax : number, None
+        apply_bandpass : bool; default True
+            If set to True, divide out a time-median value per frequency bin
+            per polarization per baseline. Note that this may filter time-constant
+            signals.
+        uvmax : number, None; default 700
             Limit by a maximum *uv*-distance in meters. If `None`, use all values.
+            **units**: meters
+        mean_filter: tuple, None; default None
+            If set to a 2-element tuple (N, M) apply a median filter of N time
+            elements and M frequency elements on the data. A shape of (50, 1024)
+            will use a window size of 50s (1/6 scan) and 128 MHz (1/7 BW).
 
         Attributes
         ----------
@@ -158,20 +216,33 @@ class DynamicSpectrum:
             (time, baseline/antenna, spw*channel, polarization)
         freq : nd.ndarray
         time : np.ndarray
+        baselines : list
+            List of antenna pair names for each basline
+        baseline_names : list
+            Concatenated name string, e.g. "ea01@ea02"
         """
         assert corr in ("cross", "auto")
         self.scan = scan
         self.corr = corr
+        self.apply_bandpass = apply_bandpass
         self.uvmax = uvmax
-        if corr == "auto" and uvmax is not None:
-            raise ValueError("corr must be 'cross' to use `uvmax` parameter.")
+        self.mean_filter = mean_filter
+        self.baselines = scan.baselines
+        # Time and frequency
+        freq = scan.freqs().ravel() / 1e6  # MHz
+        time = scan.times()
+        time = (time - time[0]) * 86400.0  # seconds
+        self.freq = freq
+        self.time = time
         # Read data from BDF, take abs, and reshape for convenience
         # shape -> (t, b/a, s, b, c, p)
         data = np.abs(scan.bdf.get_data(type=corr))
         s = data.shape
         # shape -> (t, b/a, s*b*c, p); note b=bin has length 1
         data = data.reshape(s[0], s[1], s[2]*s[3]*s[4], s[5])
-        if uvmax is not None:
+        # shape -> (p, b/a, t, f); for access performance
+        data = data.transpose((3, 1, 0, 2)).copy()
+        if uvmax is not None and corr == "cross":
             assert uvmax > 0
             # shape.T -> (U, b); note U/uvw coordinate has length 3
             uvw = sdmpy.calib.uvw(
@@ -181,23 +252,40 @@ class DynamicSpectrum:
                     method="astropy",
             ).transpose()
             uvdist = np.sqrt(uvw[0]**2 + uvw[1]**2)
-            uvdist_mask = uvdist > uvmax
-            data[:,uvdist_mask,:,:] = np.nan
-        # Rudimentary bandpass and normalization
-        data_bp = np.nanmedian(data, axis=0, keepdims=True)  # over time
-        data_bl = np.nanmean(data_bp, axis=2, keepdims=True)  # over freq
-        data_bl[data_bl == 0.0] = np.nan
-        data[data == 0.0] = np.nan
-        data /= data_bl
-        # shape -> (time, baseline/antenna, frequency, polariation)
+            uvdist_mask = uvdist < uvmax
+            if not np.any(uvdist_mask):
+                raise ValueError(f"No baselines with uvdist < {uvmax}")
+            data = data[:,uvdist_mask,:,:]
+            self.baselines = list(compress(self.baselines, uvdist_mask))
+        self.baseline_names = [f"{a}@{b}" for a,b in self.baselines]
+        # Rudimentary bandpass calibration
+        if apply_bandpass:
+            time_med = np.nanmedian(data, axis=2, keepdims=True)
+            filtered = median_filter(time_med, size=(1, 1, 1, 128))
+            data /= filtered
+        else:
+            # Rudimentary normalization/scaling per baseline/pol
+            data_bp = np.nanmedian(data, axis=2, keepdims=True)  # over time
+            data_bl = np.nanmean(data_bp, axis=3, keepdims=True)  # over freq
+            data_bl[data_bl == 0.0] = np.nan
+            data[data == 0.0] = np.nan
+            data /= data_bl
+        # Apply mean filter
+        if mean_filter is not None:
+            assert len(mean_filter) == 2
+            kernel = np.ones((1, 1, *mean_filter))
+            kernel /= kernel.sum()
+            data[np.isnan(data)] = 0.0
+            flat = fftconvolve(np.ones_like(data), kernel, mode="same", axes=(2, 3))
+            fdata = fftconvolve(data, kernel, mode="same", axes=(2, 3))
+            data = data - (fdata / flat)
+        # Blank out band edges
+        data[:,:,:, np.arange(150)] = np.nan
+        data[:,:,:,-np.arange(150)] = np.nan
+        # shape -> (polarization, baseline/antenna, time, frequency)
         self.data = data
         self.shape = data.shape
-        # Time and frequency
-        freq = scan.freqs().ravel() / 1e6  # MHz
-        time = scan.times()
-        time = (time - time[0]) * 86400.0  # seconds
-        self.freq = freq
-        self.time = time
+        self.nspec = data.shape[1]
 
     @property
     def extent(self):
@@ -210,12 +298,36 @@ class DynamicSpectrum:
 
     def get_all_spec(self, pol=0):
         assert pol in (0, 1)
-        spec = self.data[...,pol]
-        return spec
+        return self.data[pol]
+
+    def get_spec_by_baseline(self, ant1, ant2):
+        assert self.corr == "cross"
+        ix = self.baselines.index((ant1, ant2))
+        return self.data[:,ix]
 
     def get_max_spec(self, pol=0):
         spec = self.get_all_spec(pol=pol)
-        return np.nanmax(spec, axis=1)
+        return np.nanmax(spec, axis=0)  # over baseline/antenna
+
+    def get_mean_spec(self, pol=0):
+        spec = self.get_all_spec(pol=pol)
+        return np.nanmean(spec, axis=0)  # over baseline/antenna
+
+
+def get_scan_group(sdm, band="a", **dyna_kwargs):
+    """
+    Parameters
+    ----------
+    sdm : sdmpy.SDM
+    band : str
+    **dyna_kwargs
+        Arguments passed to `DynamicSpectrum`
+    """
+    assert band in SCANS_BY_BAND
+    return [
+            DynamicSpectrum(sdm.scan(scan_id), **dyna_kwargs)
+            for scan_id in SCANS_BY_BAND[band]
+    ]
 
 
 class ExecutionBlock:
@@ -249,9 +361,10 @@ class ExecutionBlock:
         self.hann_path = add_ext(vis_path, ".ms.hann")
         self.overwrite = overwrite
         try:
-            self.run_id = SDM_NAME_MAP[sdm_name]
+            self.run_id = RUN_FROM_SDM[sdm_name]
         except KeyError:
-            raise RuntimeError(f"SDM name not in `SDM_NAME_MAP`: {sdm_name}")
+            raise RuntimeError(f"SDM name not in `RUN_FROM_SDM`: {sdm_name}")
+        self.location = LOCATIONS[self.run_id]
 
     @property
     def keep_existing(self):
@@ -294,67 +407,164 @@ class ExecutionBlock:
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
 
-    def plot_waterfall_array_max(self, scannum, corr="cross", uvmax=None,
-            outname=None):
+    def add_time_freq_labels(self, ax):
+        if ax.is_last_row():
+            ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+        if ax.is_first_col():
+            ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+
+    def plot_waterfall_array_max(self, scan_id, corr="cross", vmin=2.0,
+            vmax=3.0, outname=None, **dyna_kwargs):
         """
         Parameters
         ----------
-        scannum : int
-        corr : str, default "cross"
-        uvmax : number, None
+        scan_id : int
+        corr : str; default "cross"
+        vmin : number
+        vmax : number
         outname : str, None
+        **dyna_kwargs
         """
-        outname = f"D{self.run_id}_{scannum}_{corr}" if outname is None else outname
-        outname += '' if uvmax is None else f"_uvmax{uvmax}"
+        outname = f"D{self.run_id}_{scan_id}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        scan = self.sdm.scan(scannum)
-        dyna = DynamicSpectrum(scan, corr=corr)
+        scan = self.sdm.scan(scan_id)
+        dyna = DynamicSpectrum(scan, corr=corr, **dyna_kwargs)
         fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
                 figsize=(4, 4))
         for pol, ax in zip(range(2), axes):
             spec = dyna.get_max_spec(pol=pol)
-            ax.imshow(np.log10(spec), cmap=CMAP, extent=dyna.extent, aspect="auto")
-            ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
-            txt = ax.annotate(f"P{pol}", xy=(0.9, 0.8), xycoords="axes fraction",
-                    fontsize=12)
-            txt.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="w")])
-        axes[1].set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-        axes[0].set_title(f"{self.run_id} Field={scan.source}; Scan={scannum}; {corr.capitalize()}")
+            ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            ax.set_title(f"P{pol}", loc="right")
+            self.add_time_freq_labels(ax)
+        axes[0].set_title(
+                f"{self.run_id} Field={scan.source}; Scan={scan_id}; {corr.capitalize()}",
+                loc="left",
+        )
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
-    def plot_waterfall_auto_grid(self, scannum, pol=0, outname=None):
+    def plot_waterfall_array_max_groups(self, band, corr="cross", vmin=2.0,
+            vmax=3.0, outname=None, **dyna_kwargs):
         """
         Parameters
         ----------
-        scannum : int
-        pol : int, default 0
-        outname : (str, None)
+        band : str
+        corr : str; default "cross"
+        vmin : number
+        vmax : number
+        outname : str, None
+        **dyna_kwargs
+        """
+        outname = f"D{self.run_id}_{band}_{corr}" if outname is None else outname
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        dyna_group = get_scan_group(self.sdm, band=band)
+        scan_ids = ",".join([d.scan.idx for d in dyna_group])
+        fig = plt.figure(figsize=(8.0, 6.5))
+        fig.suptitle(
+                f"{self.run_id} Field={dyna_group[0].scan.source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
+        )
+        outer_grid = gridspec.GridSpec(nrows=1, ncols=2, left=0.10, right=0.95,
+                top=0.92, bottom=0.1, wspace=0.15, hspace=0.1)
+        for p_ix in range(2):
+            inner_grid = gridspec.GridSpecFromSubplotSpec(nrows=3, ncols=1,
+                    subplot_spec=outer_grid[p_ix], hspace=0.0)
+            for g_ix, dyna in enumerate(reversed(dyna_group)):
+                spec = dyna.get_max_spec(pol=p_ix)
+                ax = plt.Subplot(fig, inner_grid[g_ix])
+                ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                        vmin=vmin, vmax=vmax)
+                # Axis labeling plumbing
+                # FIXME This would be more elegant with the `fig.subfigures`
+                #       in matplotlib v3.4
+                if g_ix == 0:
+                    ax.set_title(f"P{p_ix}", loc="right")
+                if g_ix == 2:
+                    ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+                if g_ix in (0, 1):
+                    ax.set_xticks([])
+                if p_ix == 0:
+                    ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+                fig.add_subplot(ax)
+        savefig(f"{outname}.pdf")
+
+    def plot_waterfall_cross_grid(self, scan_id, pol=0, vmin=1.0, vmax=1.6,
+            outname=None, **dyna_kwargs):
+        """
+        Parameters
+        ----------
+        scan_id : int
+        pol : int; default 0
+        vmin : number
+        vmax : number
+        outname : str, None
+        **dyna_kwargs
         """
         outname = (
-                f"D{self.run_id}_S{scannum}_P{pol}_all_autos"
+                f"D{self.run_id}_S{scan_id}_P{pol}_all_cross"
                 if outname is None else outname
         )
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        scan = self.sdm.scan(scannum)
-        dyna = DynamicSpectrum(scan, corr="auto")
+        scan = self.sdm.scan(scan_id)
+        dyna = DynamicSpectrum(scan, corr="cross", **dyna_kwargs)
+        spec = dyna.get_all_spec(pol=pol)
+        nspec = dyna.nspec
+        ncols = 4
+        nrows = nspec // ncols
+        nrows += 1 if nspec % ncols > 0 else 0
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True, sharey=True,
+                figsize=(8.5, 1.55*nrows))
+        axiter = iter(axes.flatten())
+        for b_ix, ax in zip(range(nspec), axiter):
+            ax.imshow(spec[b_ix], cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            ax.set_title(dyna.baseline_names[b_ix], loc="right",
+                    fontdict={"fontsize": 8}, pad=2)
+            self.add_time_freq_labels(ax)
+        for ax in axiter:
+            ax.set_visible(False)
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_waterfall_auto_grid(self, scan_id, pol=0, outname=None, vmin=0.995,
+            vmax=1.03, **dyna_kwargs):
+        """
+        Parameters
+        ----------
+        scan_id : int
+        pol : int, default 0
+        vmin : number
+        vmax : number
+        outname : (str, None)
+        **dyna_kwargs
+        """
+        outname = (
+                f"D{self.run_id}_S{scan_id}_P{pol}_all_autos"
+                if outname is None else outname
+        )
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        scan = self.sdm.scan(scan_id)
+        dyna = DynamicSpectrum(scan, corr="auto", **dyna_kwargs)
         spec = dyna.get_all_spec(pol=pol)
         fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
                 figsize=(8.5, 6.3))
         for (ant_ix, ant_name), ax in zip(enumerate(scan.antennas), axes.flatten()):
-            ant_spec = spec[:,ant_ix,:]
-            ax.imshow(np.log10(ant_spec), cmap=CMAP, extent=dyna.extent, aspect="auto")
-            txt = ax.annotate(ant_name, xy=(0.8, 0.85), xycoords="axes fraction",
-                    fontsize=10)
-            txt.set_path_effects([patheffects.withStroke(linewidth=3.5, foreground="w")])
-            if ax.is_last_row():
-                ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-            if ax.is_first_col():
-                ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+            ant_spec = spec[ant_ix]
+            ant_spec /= np.nanmedian(ant_spec)
+            ant_spec /= np.nanmedian(ant_spec, axis=0, keepdims=True)
+            ant_spec /= np.nanmedian(ant_spec, axis=1, keepdims=True)
+            ax.imshow(ant_spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            ax.set_title(ant_name, loc="right", fontdict={"fontsize": 8}, pad=2)
+            self.add_time_freq_labels(ax)
         axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
         axes[-1][-1].set_visible(False)
         plt.tight_layout()
@@ -369,7 +579,10 @@ class ExecutionBlock:
                 scan_id = int(scan.idx)
                 self.plot_waterfall_array_max(scan_id, corr=corr)
                 for pol in (0, 1):
+                    self.plot_waterfall_cross_grid(scan_id, pol=pol)
                     self.plot_waterfall_auto_grid(scan_id, pol=pol)
+        for band in list("abcd"):
+            self.plot_waterfall_array_max_groups(band)
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="cross"):
