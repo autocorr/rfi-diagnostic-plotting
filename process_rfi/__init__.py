@@ -66,3 +66,4 @@ PATHS = ProjPaths(
         Path(cfg_parser.get("Paths", "VIS_DIR")),
 )
 
+

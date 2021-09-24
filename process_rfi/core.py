@@ -427,6 +427,7 @@ class ExecutionBlock:
         outname : str, None
         """
         scan_id = dyna.scan_id
+        source = dyna.scan.source
         corr = dyna.corr
         outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
@@ -441,7 +442,7 @@ class ExecutionBlock:
             ax.set_title(f"P{pol}", loc="right")
             self.add_time_freq_labels(ax)
         axes[0].set_title(
-                f"{self.run_id} Field={scan.source}; Scan={scan_id}; {corr.capitalize()}",
+                f"{self.run_id} Field={source}; Scan={scan_id}; {corr.capitalize()}",
                 loc="left",
         )
         plt.tight_layout()
@@ -459,6 +460,7 @@ class ExecutionBlock:
         outname : str, None
         """
         corr = dyna_group[0].corr
+        source = dyna_group[0].scan.source
         scan_ids = ",".join([d.scan.idx for d in dyna_group])
         outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
@@ -466,7 +468,7 @@ class ExecutionBlock:
             return
         fig = plt.figure(figsize=(8.0, 6.5))
         fig.suptitle(
-                f"{self.run_id} Field={dyna_group[0].scan.source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
+                f"{self.run_id} Field={source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
         )
         outer_grid = gridspec.GridSpec(nrows=1, ncols=2, left=0.10, right=0.95,
                 top=0.92, bottom=0.1, wspace=0.15, hspace=0.1)
@@ -553,7 +555,7 @@ class ExecutionBlock:
         spec = dyna.get_all_spec(pol=pol)
         fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
                 figsize=(8.5, 6.3))
-        for (ant_ix, ant_name), ax in zip(enumerate(scan.antennas), axes.flatten()):
+        for (ant_ix, ant_name), ax in zip(enumerate(dyna.scan.antennas), axes.flatten()):
             ant_spec = spec[ant_ix]
             ant_spec /= np.nanmedian(ant_spec)
             ant_spec /= np.nanmedian(ant_spec, axis=0, keepdims=True)
@@ -571,30 +573,22 @@ class ExecutionBlock:
         assert self.sdm_path.exists()
         log_post(f"-- Creating all waterfall plots for: {self.name}")
         corr_types = ("cross", "auto")
-        scan = self.sdm.scans()
+        scans = self.sdm.scans()
         for scan in scans:
             dyna = DynamicSpectrum(scan, corr="auto")
             self.plot_waterfall_array_max(dyna)
             for pol in (0, 1):
                 self.plot_waterfall_auto_grid(dyna, pol=pol)
             del dyna
-        for dyna in scans:
+        for scan in scans:
             dyna = DynamicSpectrum(scan, corr="cross")
             self.plot_waterfall_array_max(dyna)
             for pol in (0, 1):
                 self.plot_waterfall_cross_grid(dyna, pol=pol)
             del dyna
-        # FIXME
-        # dyna groups
-        for scan in self.sdm.scans():
-            for corr in ("cross", "auto"):
-                scan_id = int(scan.idx)
-                self.plot_waterfall_array_max(scan_id, corr=corr)
-            for pol in (0, 1):
-                self.plot_waterfall_cross_grid(scan_id, pol=pol)
-                self.plot_waterfall_auto_grid(scan_id, pol=pol)
         for band in list("abcd"):
-            self.plot_waterfall_array_max_groups(band)
+            group = get_scan_group(self.sdm, band=band)
+            self.plot_waterfall_array_max_groups(group)
 
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="cross"):
