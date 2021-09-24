@@ -3,5 +3,6 @@ casatasks
 casatools
 matplotlib
 numpy
+odfpy
 scipy
 sdmpy

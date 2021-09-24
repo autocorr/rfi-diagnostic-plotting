@@ -3,6 +3,7 @@
 import os
 import copy
 import shutil
+import multiprocessing
 from pathlib import Path
 from itertools import compress
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ SCANS_BY_BAND = {
 
 SDM_FROM_RUN = {
          "0.1": "TRFI0004_sb40126827_1_1.59466.78501478009",
+         "0.2": "TRFI0004.sb40134306.eb40140841.59468.47321561343",
          "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
          "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
          "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
@@ -66,6 +68,7 @@ RUN_FROM_SDM = {v: k for k, v in SDM_FROM_RUN.items()}
 
 LOCATIONS = {
          "0.1": "N/A",
+         "0.2": "N/A",
          "1.1": "VLA Site",
          "1.2": "Route 60",
          "1.3": "Magdalena",
@@ -75,7 +78,7 @@ LOCATIONS = {
          "2.3": "Almao Pos. 2",
          "2.4": "Datil",
          "2.5": "Pie Town",
-         "3.1": "?",
+         "3.1": "Unknown",
 }
 assert all([k in SDM_FROM_RUN for k in LOCATIONS])
 
@@ -228,6 +231,7 @@ class DynamicSpectrum:
         self.uvmax = uvmax
         self.mean_filter = mean_filter
         self.baselines = scan.baselines
+        self.scan_id = int(scan.idx)
         # Time and frequency
         freq = scan.freqs().ravel() / 1e6  # MHz
         time = scan.times()
@@ -413,24 +417,21 @@ class ExecutionBlock:
         if ax.is_first_col():
             ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
 
-    def plot_waterfall_array_max(self, scan_id, corr="cross", vmin=2.0,
-            vmax=3.0, outname=None, **dyna_kwargs):
+    def plot_waterfall_array_max(self, dyna, vmin=2.0, vmax=3.0, outname=None):
         """
         Parameters
         ----------
-        scan_id : int
-        corr : str; default "cross"
+        dyna : DynamicSpectrum
         vmin : number
         vmax : number
         outname : str, None
-        **dyna_kwargs
         """
+        scan_id = dyna.scan_id
+        corr = dyna.corr
         outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        scan = self.sdm.scan(scan_id)
-        dyna = DynamicSpectrum(scan, corr=corr, **dyna_kwargs)
         fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
                 figsize=(4, 4))
         for pol, ax in zip(range(2), axes):
@@ -446,24 +447,23 @@ class ExecutionBlock:
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
-    def plot_waterfall_array_max_groups(self, band, corr="cross", vmin=2.0,
-            vmax=3.0, outname=None, **dyna_kwargs):
+    def plot_waterfall_array_max_groups(self, band, dyna_group, vmin=2.0,
+            vmax=3.0, outname=None):
         """
         Parameters
         ----------
         band : str
-        corr : str; default "cross"
+        dyna_group : Iterable(DynamicSpectrum)
         vmin : number
         vmax : number
         outname : str, None
-        **dyna_kwargs
         """
+        corr = dyna_group[0].corr
+        scan_ids = ",".join([d.scan.idx for d in dyna_group])
         outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        dyna_group = get_scan_group(self.sdm, band=band)
-        scan_ids = ",".join([d.scan.idx for d in dyna_group])
         fig = plt.figure(figsize=(8.0, 6.5))
         fig.suptitle(
                 f"{self.run_id} Field={dyna_group[0].scan.source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
@@ -492,18 +492,18 @@ class ExecutionBlock:
                 fig.add_subplot(ax)
         savefig(f"{outname}.pdf")
 
-    def plot_waterfall_cross_grid(self, scan_id, pol=0, vmin=1.0, vmax=1.6,
-            outname=None, **dyna_kwargs):
+    def plot_waterfall_cross_grid(self, dyna, pol=0, vmin=1.0, vmax=1.6,
+            outname=None):
         """
         Parameters
         ----------
-        scan_id : int
+        dyna : DynamicSpectrum
         pol : int; default 0
         vmin : number
         vmax : number
         outname : str, None
-        **dyna_kwargs
         """
+        scan_id = dyna.scan_id
         outname = (
                 f"D{self.run_id}_S{scan_id}_P{pol}_all_cross"
                 if outname is None else outname
@@ -511,8 +511,6 @@ class ExecutionBlock:
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        scan = self.sdm.scan(scan_id)
-        dyna = DynamicSpectrum(scan, corr="cross", **dyna_kwargs)
         spec = dyna.get_all_spec(pol=pol)
         nspec = dyna.nspec
         ncols = 4
@@ -532,18 +530,19 @@ class ExecutionBlock:
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
-    def plot_waterfall_auto_grid(self, scan_id, pol=0, outname=None, vmin=0.995,
-            vmax=1.03, **dyna_kwargs):
+    def plot_waterfall_auto_grid(self, dyna, pol=0, outname=None, vmin=0.995,
+            vmax=1.03):
         """
         Parameters
         ----------
-        scan_id : int
+        dyna : DynamicSpectrum
         pol : int, default 0
         vmin : number
         vmax : number
         outname : (str, None)
         **dyna_kwargs
         """
+        scan_id = dyna.scan_id
         outname = (
                 f"D{self.run_id}_S{scan_id}_P{pol}_all_autos"
                 if outname is None else outname
@@ -551,8 +550,6 @@ class ExecutionBlock:
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
             return
-        scan = self.sdm.scan(scan_id)
-        dyna = DynamicSpectrum(scan, corr="auto", **dyna_kwargs)
         spec = dyna.get_all_spec(pol=pol)
         fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
                 figsize=(8.5, 6.3))
@@ -574,8 +571,23 @@ class ExecutionBlock:
         assert self.sdm_path.exists()
         log_post(f"-- Creating all waterfall plots for: {self.name}")
         corr_types = ("cross", "auto")
+        scan = self.sdm.scans()
+        for scan in scans:
+            dyna = DynamicSpectrum(scan, corr="auto")
+            self.plot_waterfall_array_max(dyna)
+            for pol in (0, 1):
+                self.plot_waterfall_auto_grid(dyna, pol=pol)
+            del dyna
+        for dyna in scans:
+            dyna = DynamicSpectrum(scan, corr="cross")
+            self.plot_waterfall_array_max(dyna)
+            for pol in (0, 1):
+                self.plot_waterfall_cross_grid(dyna, pol=pol)
+            del dyna
+        # FIXME
+        # dyna groups
         for scan in self.sdm.scans():
-            for corr in corr_types:
+            for corr in ("cross", "auto"):
                 scan_id = int(scan.idx)
                 self.plot_waterfall_array_max(scan_id, corr=corr)
             for pol in (0, 1):
@@ -720,6 +732,18 @@ def get_all_sdm_filenames():
             p.name for p in PATHS.sdm.glob(f"{prefix}*")
     ])
     return sdm_names
+
+
+def make_waterfalls_from_sdm_name(name):
+    eb = ExecutionBlock(name)
+    eb.plot_all_waterfall()
+
+
+def plot_waterfall_in_parallel():
+    sdm_names = get_all_sdm_filenames()
+    n_sdm = len(sdm_names)
+    with multiprocessing.Pool(n_sdm) as pool:
+        pool.map(make_waterfalls_from_sdm_name, sdm_names)
 
 
 def process_all_executions(overwrite=False):
