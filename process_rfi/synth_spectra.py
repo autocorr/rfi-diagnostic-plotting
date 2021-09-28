@@ -21,6 +21,10 @@ class SignalChannel:
 
     def __post_init__(self):
         assert self.index in (*range(1, 9), *range(11, 19))
+        # Convert frequencies in GHz to MHz
+        self.freq_center *= 1e3
+        self.freq_start *= 1e3
+        self.freq_stop *= 1e3
 
     @property
     def is_uplink(self) -> bool:
@@ -34,6 +38,7 @@ class SignalChannel:
 ALL_CHANNELS = {
         chan.index: chan
         for chan in [
+                # Frequencies in GHz
                 # Downlink channels
                 SignalChannel( 1, 250.0, 10.82500, 10.70000, 10.95000),
                 SignalChannel( 2, 250.0, 11.07500, 10.95000, 11.20000),
@@ -101,13 +106,29 @@ def parse_excel_report(filen):
             continue
         eb_df = parse_sheet(filen, sheet_name)
         all_df.append(eb_df)
-    df = pd.concat(all_df)
+    df = pd.concat(all_df, ignore_index=True)
     return df
 
 
-class Synthesizer:
-    def __init__(self, df):
+class Emitter:
+    def __init__(self, df, delta_t=2.0):
+        """
+        Container-type for received/transmitted data packet timing data.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+        delta_t : int
+            Minimum time difference to mark as RFI occurring if less than 1.0
+            second in duration.
+        """
         self.df = df
+        self.delta_t = delta_t
+
+    @classmethod
+    def from_ods(cls, filen, **kwargs):
+        df = parse_excel_report(filen)
+        return cls(df, **kwargs)
 
     @property
     def time_min(self):
@@ -117,11 +138,48 @@ class Synthesizer:
     def time_max(self):
         return self.df.mjd_end_s.max()
 
-    def spec_like(self, dyna):
-        freq = dyna.freq / 1e3  # MHz to GHz
-        time = dyna.time
+    def spec_like(self, scan):
+        """
+        Create a synthetic dynamic spectrum of the same time and frequency
+        shape as the scan.
+
+        Parameters
+        ----------
+        scan : sdmpy.Scan
+
+        Returns
+        -------
+        data : numpy.ndarray
+        extent : list
+        """
+        freq = scan.freqs().ravel() * u.Hz.to("MHz")
+        time = scan.times() * u.day.to("s")
+        tmin = time.min()
+        tmax = time.max()
+        r_time = time - time.min()
+        extent = (freq.min(), freq.max(), r_time.min(), r_time.max())
         F, T = np.meshgrid(freq, time)
         data = np.zeros_like(F)
-        df = self.df.query()
+        # Select channels with known transmission and filter by time.
+        df = (self.df
+                .query("rx_chan.notnull() or tx_chan.notnull()", engine="python")
+                .query("mjd_start_s > @tmin and mjd_start_s < @tmax")
+        )
+        if tmin > self.time_max or tmax < self.time_min or df.shape[0] == 0:
+            return data, extent
+        # Fill in values in data array to create synthetic dynamic spectrum
+        for _, row in df.iterrows():
+            chan_cols = [
+                    ["rx_chan", "rx_flo", "rx_fhi"],
+                    ["tx_chan", "tx_flo", "tx_fhi"],
+            ]
+            for kind_col, f_lo_col, f_hi_col in chan_cols:
+                if pd.notnull(row[kind_col]):
+                    cols = [f_lo_col, f_hi_col, "mjd_start_s", "mjd_end_s"]
+                    f_lo, f_hi, t_lo, t_hi = row[cols]
+                    if (t_hi - t_lo) < 1.0:
+                        t_hi = t_lo + self.delta_t
+                    data[(F > f_lo) & (F < f_hi) & (T > t_lo) & (T < t_hi)] = 1.0
+        return data, extent
 
 

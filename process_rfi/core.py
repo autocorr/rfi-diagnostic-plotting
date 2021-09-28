@@ -28,6 +28,7 @@ from casatools import msmetadata
 from casaplotms import plotms
 
 from process_rfi import PATHS
+from process_rfi.synth_spectra import Emitter
 
 
 # Matplotlib configuration settings
@@ -47,12 +48,13 @@ SCANS_BY_BAND = {
         "a": (1,  6,  9),
         "b": (2, 10, 12),
         "c": (3, 11, 13),
-        "d": (4,  5,  8),
+        "d": (4,  5,  7,  8),
 }
 
 SDM_FROM_RUN = {
          "0.1": "TRFI0004_sb40126827_1_1.59466.78501478009",
          "0.2": "TRFI0004.sb40134306.eb40140841.59468.47321561343",
+         "0.3": "TRFI0004_sb40302025_1_1.59480.94574135417",
          "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
          "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
          "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
@@ -69,6 +71,7 @@ RUN_FROM_SDM = {v: k for k, v in SDM_FROM_RUN.items()}
 LOCATIONS = {
          "0.1": "N/A",
          "0.2": "N/A",
+         "0.3": "N/A",
          "1.1": "VLA Site",
          "1.2": "Route 60",
          "1.3": "Magdalena",
@@ -233,9 +236,10 @@ class DynamicSpectrum:
         self.baselines = scan.baselines
         self.scan_id = int(scan.idx)
         # Time and frequency
-        freq = scan.freqs().ravel() / 1e6  # MHz
+        freq = scan.freqs().ravel() / 1e6  # Hz to MHz
         time = scan.times()
-        time = (time - time[0]) * 86400.0  # seconds
+        self.mjd_s = time
+        time = (time - time[0]) * 86400.0  # days to seconds
         self.freq = freq
         self.time = time
         # Read data from BDF, take abs, and reshape for convenience
@@ -411,185 +415,6 @@ class ExecutionBlock:
         else:
             log_post(f"-- File exists, continuing: {self.hann_path}")
 
-    def add_time_freq_labels(self, ax):
-        if ax.is_last_row():
-            ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-        if ax.is_first_col():
-            ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
-
-    def plot_waterfall_array_max(self, dyna, vmin=2.0, vmax=3.0, outname=None):
-        """
-        Parameters
-        ----------
-        dyna : DynamicSpectrum
-        vmin : number
-        vmax : number
-        outname : str, None
-        """
-        scan_id = dyna.scan_id
-        source = dyna.scan.source
-        corr = dyna.corr
-        outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
-        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
-            log_post(f"-- File exists, continuing: {outname}")
-            return
-        fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
-                figsize=(4, 4))
-        for pol, ax in zip(range(2), axes):
-            spec = dyna.get_max_spec(pol=pol)
-            ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
-                    vmin=vmin, vmax=vmax)
-            ax.set_title(f"P{pol}", loc="right")
-            self.add_time_freq_labels(ax)
-        axes[0].set_title(
-                f"{self.run_id} Field={source}; Scan={scan_id}; {corr.capitalize()}",
-                loc="left",
-        )
-        plt.tight_layout()
-        savefig(f"{outname}.pdf")
-
-    def plot_waterfall_array_max_groups(self, band, dyna_group, vmin=2.0,
-            vmax=3.0, outname=None):
-        """
-        Parameters
-        ----------
-        band : str
-        dyna_group : Iterable(DynamicSpectrum)
-        vmin : number
-        vmax : number
-        outname : str, None
-        """
-        corr = dyna_group[0].corr
-        source = dyna_group[0].scan.source
-        scan_ids = ",".join([d.scan.idx for d in dyna_group])
-        outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
-        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
-            log_post(f"-- File exists, continuing: {outname}")
-            return
-        fig = plt.figure(figsize=(8.0, 6.5))
-        fig.suptitle(
-                f"{self.run_id} Field={source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
-        )
-        outer_grid = gridspec.GridSpec(nrows=1, ncols=2, left=0.10, right=0.95,
-                top=0.92, bottom=0.1, wspace=0.15, hspace=0.1)
-        for p_ix in range(2):
-            inner_grid = gridspec.GridSpecFromSubplotSpec(nrows=3, ncols=1,
-                    subplot_spec=outer_grid[p_ix], hspace=0.0)
-            for g_ix, dyna in enumerate(reversed(dyna_group)):
-                spec = dyna.get_max_spec(pol=p_ix)
-                ax = plt.Subplot(fig, inner_grid[g_ix])
-                ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
-                        vmin=vmin, vmax=vmax)
-                # Axis labeling plumbing
-                # FIXME This would be more elegant with the `fig.subfigures`
-                #       in matplotlib v3.4
-                if g_ix == 0:
-                    ax.set_title(f"P{p_ix}", loc="right")
-                if g_ix == 2:
-                    ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
-                if g_ix in (0, 1):
-                    ax.set_xticks([])
-                if p_ix == 0:
-                    ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
-                fig.add_subplot(ax)
-        savefig(f"{outname}.pdf")
-
-    def plot_waterfall_cross_grid(self, dyna, pol=0, vmin=1.0, vmax=1.6,
-            outname=None):
-        """
-        Parameters
-        ----------
-        dyna : DynamicSpectrum
-        pol : int; default 0
-        vmin : number
-        vmax : number
-        outname : str, None
-        """
-        scan_id = dyna.scan_id
-        outname = (
-                f"D{self.run_id}_S{scan_id}_P{pol}_all_cross"
-                if outname is None else outname
-        )
-        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
-            log_post(f"-- File exists, continuing: {outname}")
-            return
-        spec = dyna.get_all_spec(pol=pol)
-        nspec = dyna.nspec
-        ncols = 4
-        nrows = nspec // ncols
-        nrows += 1 if nspec % ncols > 0 else 0
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True, sharey=True,
-                figsize=(8.5, 1.55*nrows))
-        axiter = iter(axes.flatten())
-        for b_ix, ax in zip(range(nspec), axiter):
-            ax.imshow(spec[b_ix], cmap=CMAP, extent=dyna.extent, aspect="auto",
-                    vmin=vmin, vmax=vmax)
-            ax.set_title(dyna.baseline_names[b_ix], loc="right",
-                    fontdict={"fontsize": 8}, pad=2)
-            self.add_time_freq_labels(ax)
-        for ax in axiter:
-            ax.set_visible(False)
-        plt.tight_layout()
-        savefig(f"{outname}.pdf")
-
-    def plot_waterfall_auto_grid(self, dyna, pol=0, outname=None, vmin=0.995,
-            vmax=1.03):
-        """
-        Parameters
-        ----------
-        dyna : DynamicSpectrum
-        pol : int, default 0
-        vmin : number
-        vmax : number
-        outname : (str, None)
-        **dyna_kwargs
-        """
-        scan_id = dyna.scan_id
-        outname = (
-                f"D{self.run_id}_S{scan_id}_P{pol}_all_autos"
-                if outname is None else outname
-        )
-        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
-            log_post(f"-- File exists, continuing: {outname}")
-            return
-        spec = dyna.get_all_spec(pol=pol)
-        fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
-                figsize=(8.5, 6.3))
-        for (ant_ix, ant_name), ax in zip(enumerate(dyna.scan.antennas), axes.flatten()):
-            ant_spec = spec[ant_ix]
-            ant_spec /= np.nanmedian(ant_spec)
-            ant_spec /= np.nanmedian(ant_spec, axis=0, keepdims=True)
-            ant_spec /= np.nanmedian(ant_spec, axis=1, keepdims=True)
-            ax.imshow(ant_spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
-                    vmin=vmin, vmax=vmax)
-            ax.set_title(ant_name, loc="right", fontdict={"fontsize": 8}, pad=2)
-            self.add_time_freq_labels(ax)
-        axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
-        axes[-1][-1].set_visible(False)
-        plt.tight_layout()
-        savefig(f"{outname}.pdf")
-
-    def plot_all_waterfall(self):
-        assert self.sdm_path.exists()
-        log_post(f"-- Creating all waterfall plots for: {self.name}")
-        corr_types = ("cross", "auto")
-        scans = self.sdm.scans()
-        for scan in scans:
-            dyna = DynamicSpectrum(scan, corr="auto")
-            self.plot_waterfall_array_max(dyna)
-            for pol in (0, 1):
-                self.plot_waterfall_auto_grid(dyna, pol=pol)
-            del dyna
-        for scan in scans:
-            dyna = DynamicSpectrum(scan, corr="cross")
-            self.plot_waterfall_array_max(dyna)
-            for pol in (0, 1):
-                self.plot_waterfall_cross_grid(dyna, pol=pol)
-            del dyna
-        for band in list("abcd"):
-            group = get_scan_group(self.sdm, band=band)
-            self.plot_waterfall_array_max_groups(group)
-
     def plot_crosspower_spectra(self, field_name, scan_id, correlation,
             corr_type="cross"):
         """
@@ -720,6 +545,258 @@ class ExecutionBlock:
         self.plot_all_crosspower_spectra_per_field()
 
 
+class WaterfallPlotter:
+    def __init__(self, eb, emitter=None, overwrite=False):
+        self.eb = eb
+        self.emitter = emitter
+        self.overwrite = overwrite
+        self.run_id = eb.run_id
+
+    @property
+    def keep_existing(self):
+        return not self.overwrite
+
+    def add_time_freq_labels(self, ax):
+        if ax.is_last_row():
+            ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+        if ax.is_first_col():
+            ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+
+    def overplot_emitter(self, ax, scan):
+        if self.emitter is None:
+            return
+        data, extent = self.emitter.spec_like(scan)
+        if data.sum() > 0:
+            ax.contour(data, origin="upper", extent=extent, levels=[0.5],
+                    colors="lime", linewidths=0.5, alpha=0.5)
+
+    def plot_rfi(self, scan, outname=None):
+        """
+        Plot a dynamic spectrum of the RX/TX transaction data.
+
+        Parameters
+        ----------
+        scan : sdmpy.Scan
+        emitter : Emitter
+        outname : str, None
+        """
+        if self.emitter is None:
+            log_post("-- No emitter used, passing.")
+            return
+        spec, extent = self.emitter.spec_like(scan)
+        outname = f"D{self.run_id}_S{scan.idx}_rfi" if outname is None else outname
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        fig, ax = plt.subplots(figsize=(4, 2.5))
+        ax.imshow(spec, cmap=CMAP, origin="upper", extent=extent,
+                aspect="auto", vmin=0.0, vmax=1.0)
+        self.add_time_freq_labels(ax)
+        ax.set_title(
+                f"{self.run_id} Field={scan.source}; Scan={scan.idx}; RFI",
+                loc="left",
+        )
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_array_max(self, dyna, vmin=2.0, vmax=3.0, outname=None):
+        """
+        Plot a waterfall plot for both polarizations by taking the maximum value
+        for each antenna/baseline (depending on correlation-type) at every (time,
+        frequency) point.
+
+        Parameters
+        ----------
+        dyna : DynamicSpectrum
+        vmin : number
+        vmax : number
+        outname : str, None
+        """
+        scan_id = dyna.scan_id
+        source = dyna.scan.source
+        corr = dyna.corr
+        outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        fig, axes = plt.subplots(nrows=2, ncols=1, sharex=True, sharey=True,
+                figsize=(4, 4))
+        for pol, ax in zip(range(2), axes):
+            spec = dyna.get_max_spec(pol=pol)
+            ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            self.overplot_emitter(ax, dyna.scan)
+            ax.set_title(f"P{pol}", loc="right")
+            self.add_time_freq_labels(ax)
+        axes[0].set_title(
+                f"{self.run_id} Field={source}; Scan={scan_id}; {corr.capitalize()}",
+                loc="left",
+        )
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_array_max_groups(self, band, dyna_group, vmin=2.0, vmax=3.0,
+            outname=None):
+        """
+        Plot waterfall spectra for groups of spectra at the same band.
+
+        Parameters
+        ----------
+        band : str
+        dyna_group : Iterable(DynamicSpectrum)
+        vmin : number
+        vmax : number
+        outname : str, None
+        """
+        corr = dyna_group[0].corr
+        source = dyna_group[0].scan.source
+        scan_ids = ",".join([d.scan.idx for d in dyna_group])
+        n_spec = len(dyna_group)
+        outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        fig = plt.figure(figsize=(8.0, 2.17*n_spec))
+        fig.suptitle(
+                f"{self.run_id} Field={source}; Band={band.upper()}; Scans={scan_ids}; {corr.capitalize()}",
+        )
+        outer_grid = gridspec.GridSpec(nrows=1, ncols=2, left=0.10, right=0.95,
+                top=0.92, bottom=0.1, wspace=0.15, hspace=0.1)
+        for p_ix in range(2):
+            inner_grid = gridspec.GridSpecFromSubplotSpec(nrows=n_spec, ncols=1,
+                    subplot_spec=outer_grid[p_ix], hspace=0.0)
+            for g_ix, dyna in enumerate(reversed(dyna_group)):
+                spec = dyna.get_max_spec(pol=p_ix)
+                ax = plt.Subplot(fig, inner_grid[g_ix])
+                ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                        vmin=vmin, vmax=vmax)
+                self.overplot_emitter(ax, dyna.scan)
+                # Axis labeling plumbing
+                # FIXME This would be more elegant with the `fig.subfigures`
+                #       in matplotlib v3.4
+                if g_ix == 0:
+                    ax.set_title(f"P{p_ix}", loc="right")
+                if g_ix == n_spec-1:
+                    ax.set_xlabel(r"$\mathrm{Frequency} \ [\mathrm{MHz}]$")
+                if g_ix in range(n_spec-1):
+                    ax.set_xticks([])
+                if p_ix == 0:
+                    ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+                fig.add_subplot(ax)
+        savefig(f"{outname}.pdf")
+
+    def plot_cross_grid(self, dyna, pol=0, vmin=1.0, vmax=1.6,
+            outname=None):
+        """
+        Plot a grid of individual waterfall plots for each cross-correlation
+        per baseline for a given polarization.
+
+        Parameters
+        ----------
+        dyna : DynamicSpectrum
+        pol : int; default 0
+        vmin : number
+        vmax : number
+        outname : str, None
+        """
+        scan_id = dyna.scan_id
+        outname = (
+                f"D{self.run_id}_S{scan_id}_P{pol}_all_cross"
+                if outname is None else outname
+        )
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        spec = dyna.get_all_spec(pol=pol)
+        nspec = dyna.nspec
+        ncols = 4
+        nrows = nspec // ncols
+        nrows += 1 if nspec % ncols > 0 else 0
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True, sharey=True,
+                figsize=(8.5, 1.55*nrows))
+        axiter = iter(axes.flatten())
+        for b_ix, ax in zip(range(nspec), axiter):
+            ax.imshow(spec[b_ix], cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            self.overplot_emitter(ax, dyna.scan)
+            ax.set_title(dyna.baseline_names[b_ix], loc="right",
+                    fontdict={"fontsize": 8}, pad=2)
+            self.add_time_freq_labels(ax)
+        for ax in axiter:
+            ax.set_visible(False)
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_auto_grid(self, dyna, pol=0, vmin=0.995, vmax=1.03,
+            outname=None):
+        """
+        Plot a grid of individual waterfall plots for each autocorrelation per
+        antenna for a given polarization.
+
+        Parameters
+        ----------
+        dyna : DynamicSpectrum
+        pol : int, default 0
+        vmin : number
+        vmax : number
+        outname : str, None
+        """
+        scan_id = dyna.scan_id
+        outname = (
+                f"D{self.run_id}_S{scan_id}_P{pol}_all_autos"
+                if outname is None else outname
+        )
+        if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
+            log_post(f"-- File exists, continuing: {outname}")
+            return
+        spec = dyna.get_all_spec(pol=pol)
+        fig, axes = plt.subplots(nrows=4, ncols=4, sharex=True, sharey=True,
+                figsize=(8.5, 6.3))
+        for (ant_ix, ant_name), ax in zip(enumerate(dyna.scan.antennas), axes.flatten()):
+            ant_spec = spec[ant_ix]
+            ant_spec /= np.nanmedian(ant_spec)
+            ant_spec /= np.nanmedian(ant_spec, axis=0, keepdims=True)
+            ant_spec /= np.nanmedian(ant_spec, axis=1, keepdims=True)
+            ax.imshow(ant_spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
+                    vmin=vmin, vmax=vmax)
+            self.overplot_emitter(ax, dyna.scan)
+            ax.set_title(ant_name, loc="right", fontdict={"fontsize": 8}, pad=2)
+            self.add_time_freq_labels(ax)
+        axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
+        axes[-1][-1].set_visible(False)
+        plt.tight_layout()
+        savefig(f"{outname}.pdf")
+
+    def plot_all(self):
+        assert self.eb.sdm_path.exists()
+        log_post(f"-- Creating all waterfall plots for: {self.eb.name}")
+        get_scans = self.eb.sdm.scans  # generator
+        # RX/TX plots per scan
+        for scan in get_scans():
+            self.plot_rfi(scan)
+        # Cross-correlation specific plots
+        for scan in get_scans():
+            dyna = DynamicSpectrum(scan, corr="cross")
+            self.plot_array_max(eb, dyna)
+            for pol in (0, 1):
+                self.plot_cross_grid(dyna, pol=pol)
+            del dyna
+        # Cross-correlation group plots.
+        # NOTE This is wasteful because it reads the BDF data again, although
+        #      if a sufficient amount of RAM is present this should be in the
+        #      filesystem buffer.
+        for band in list("abcd"):
+            group = get_scan_group(self.eb.sdm, band=band)
+            self.plot_array_max_groups(band, group)
+        # Auto-correlation specific plots
+        for scan in get_scans():
+            dyna = DynamicSpectrum(scan, corr="auto")
+            self.plot_array_max(dyna)
+            for pol in (0, 1):
+                self.plot_auto_grid(dyna, pol=pol)
+            del dyna
+
+
 def get_all_sdm_filenames():
     prefix = ExecutionBlock.prefix
     sdm_names = sorted([
@@ -730,7 +807,12 @@ def get_all_sdm_filenames():
 
 def make_waterfalls_from_sdm_name(name):
     eb = ExecutionBlock(name)
-    eb.plot_all_waterfall()
+    try:
+        emitter = Emitter.from_ods("transaction_data.ods")
+    except FileNotFoundError:
+        emitter = None
+    waterfall = WaterfallPlotter(eb, emitter=emitter)
+    waterfall.plot_all()
 
 
 def plot_waterfall_in_parallel():
