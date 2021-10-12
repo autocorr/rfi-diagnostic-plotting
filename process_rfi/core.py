@@ -55,6 +55,7 @@ SDM_FROM_RUN = {
          "0.1": "TRFI0004_sb40126827_1_1.59466.78501478009",
          "0.2": "TRFI0004.sb40134306.eb40140841.59468.47321561343",
          "0.3": "TRFI0004_sb40302025_1_1.59480.94574135417",
+         "0.4": "TRFI0004_sb40302025_1_1.59487.62864469907",
          "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
          "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
          "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
@@ -72,6 +73,7 @@ LOCATIONS = {
          "0.1": "N/A",
          "0.2": "N/A",
          "0.3": "N/A",
+         "0.4": "N/A",
          "1.1": "VLA Site",
          "1.2": "Route 60",
          "1.3": "Magdalena",
@@ -373,6 +375,11 @@ class ExecutionBlock:
         except KeyError:
             raise RuntimeError(f"SDM name not in `RUN_FROM_SDM`: {sdm_name}")
         self.location = LOCATIONS[self.run_id]
+
+    @classmethod
+    def from_run_id(cls, run_id, **kwargs):
+        sdm_name = SDM_FROM_RUN[run_id]
+        return cls(sdm_name, **kwargs)
 
     @property
     def keep_existing(self):
@@ -777,7 +784,7 @@ class WaterfallPlotter:
         # Cross-correlation specific plots
         for scan in get_scans():
             dyna = DynamicSpectrum(scan, corr="cross")
-            self.plot_array_max(eb, dyna)
+            self.plot_array_max(dyna)
             for pol in (0, 1):
                 self.plot_cross_grid(dyna, pol=pol)
             del dyna
@@ -788,6 +795,7 @@ class WaterfallPlotter:
         for band in list("abcd"):
             group = get_scan_group(self.eb.sdm, band=band)
             self.plot_array_max_groups(band, group)
+            del band
         # Auto-correlation specific plots
         for scan in get_scans():
             dyna = DynamicSpectrum(scan, corr="auto")
