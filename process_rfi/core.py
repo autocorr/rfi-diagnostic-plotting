@@ -56,6 +56,8 @@ SDM_FROM_RUN = {
          "0.2": "TRFI0004.sb40134306.eb40140841.59468.47321561343",
          "0.3": "TRFI0004_sb40302025_1_1.59480.94574135417",
          "0.4": "TRFI0004_sb40302025_1_1.59487.62864469907",
+         "0.5": "TRFI0004_sb40729015_1_1.59505.731108576394",
+         "0.6": "TRFI0004_sb40729015_1_1.59508.7288583912",
          "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
          "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
          "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
@@ -74,6 +76,8 @@ LOCATIONS = {
          "0.2": "N/A",
          "0.3": "N/A",
          "0.4": "N/A",
+         "0.5": "N/A",
+         "0.6": "N/A",
          "1.1": "VLA Site",
          "1.2": "Route 60",
          "1.3": "Magdalena",
@@ -198,7 +202,7 @@ def scan_data_to_xarray(scan, corr="cross"):
 
 class DynamicSpectrum:
     def __init__(self, scan, corr="cross", apply_bandpass=True, uvmax=700,
-            mean_filter=None):
+            mean_filter=None, edge_chan_to_blank=10):
         """
         Parameters
         ----------
@@ -216,6 +220,8 @@ class DynamicSpectrum:
             If set to a 2-element tuple (N, M) apply a median filter of N time
             elements and M frequency elements on the data. A shape of (50, 1024)
             will use a window size of 50s (1/6 scan) and 128 MHz (1/7 BW).
+        edge_chan_to_blank : int
+            Edge to channels to replace with NaNs. Will pass if 0 or None.
 
         Attributes
         ----------
@@ -235,6 +241,7 @@ class DynamicSpectrum:
         self.apply_bandpass = apply_bandpass
         self.uvmax = uvmax
         self.mean_filter = mean_filter
+        self.edge_chan_to_blank = edge_chan_to_blank
         self.baselines = scan.baselines
         self.scan_id = int(scan.idx)
         # Time and frequency
@@ -290,8 +297,9 @@ class DynamicSpectrum:
             fdata = fftconvolve(data, kernel, mode="same", axes=(2, 3))
             data = data - (fdata / flat)
         # Blank out band edges
-        data[:,:,:, np.arange(150)] = np.nan
-        data[:,:,:,-np.arange(150)] = np.nan
+        if self.edge_chan_to_blank > 0:
+            data[:,:,:,:self.edge_chan_to_blank] = np.nan
+            data[:,:,:,-self.edge_chan_to_blank:] = np.nan
         # shape -> (polarization, baseline/antenna, time, frequency)
         self.data = data
         self.shape = data.shape

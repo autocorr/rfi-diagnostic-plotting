@@ -7,9 +7,9 @@ run under CASA v6 and Python 3.
 Getting started
 ---------------
 First, clone or download this repository, copy the ``process.cfg`` file into
-the directory where CASA is to be run, and edit the paths accordingly.  Please
-ensure that the ``SDM_DIR`` is set to the directory where the ASDM files are
-stored. Then start CASA and run:
+the directory where CASA/Python is to be run, and edit the paths accordingly.
+Please ensure that the ``SDM_DIR`` is set to the directory where the ASDM files
+are stored. Then start CASA and run:
 
 .. code-block:: python
 
