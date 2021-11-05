@@ -12,6 +12,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import (gridspec, patheffects, colors)
 from matplotlib.ticker import AutoMinorLocator
+from matplotlib import patheffects as path_effects
 
 import sdmpy
 from astropy import units as u
@@ -129,6 +130,10 @@ def add_ext(path, ext):
     return path.parent / f"{path.name}{ext}"
 
 
+def split_source_name(source):
+    return source.split("=")[-1]
+
+
 def savefig(outname, dpi=300, relative=True, overwrite=True):
     outpath = PATHS.plot / outname if relative else Path(outname)
     if outpath.exists() and not overwrite:
@@ -244,6 +249,7 @@ class DynamicSpectrum:
         self.edge_chan_to_blank = edge_chan_to_blank
         self.baselines = scan.baselines
         self.scan_id = int(scan.idx)
+        self.source = split_source_name(scan.source)
         # Time and frequency
         freq = scan.freqs().ravel() / 1e6  # Hz to MHz
         time = scan.times()
@@ -577,13 +583,37 @@ class WaterfallPlotter:
         if ax.is_first_col():
             ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
 
-    def overplot_emitter(self, ax, scan):
+    def overplot_emitter_sum(self, ax, scan):
         if self.emitter is None:
             return
-        data, extent = self.emitter.spec_like(scan)
+        data, extent = self.emitter.summed_spectrum(scan)
         if data.sum() > 0:
             ax.contour(data, origin="upper", extent=extent, levels=[0.5],
                     colors="lime", linewidths=0.5, alpha=0.5)
+
+    def overplot_emitter_by_sat(self, ax, scan):
+        if self.emitter is None:
+            return
+        extent, F, T = self.emitter.get_extent(scan)
+        for data, sat_id in self.emitter.iter_spectra(scan):
+            if data.sum() > 0:
+                r, g, b, _ = plt.cm.cool((sat_id % 20) / 20)
+                color = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+                ax.contour(data, origin="upper", extent=extent, levels=[0.5],
+                        colors=color, linewidths=0.5)
+                indices = np.argwhere(data == 1)
+                t_ix = int(indices[:,0].mean())
+                f_ix = indices[:,1].max()
+                t_txt = T[-t_ix, f_ix] - T.min()
+                f_txt = F[-t_ix, f_ix] + (F.max() - F.min()) * 0.01
+                txt = ax.annotate(fr"\textbf{{ {sat_id} }}", (f_txt, t_txt),
+                        xycoords="data", ha="left", va="center_baseline",
+                        color=color, fontsize=6)
+                fg = round(1 - (r + g + b) / 3)
+                txt.set_path_effects([
+                    path_effects.Stroke(linewidth=1, foreground=f"{fg}"),
+                    path_effects.Normal(),
+                ])
 
     def plot_rfi(self, scan, outname=None):
         """
@@ -598,7 +628,8 @@ class WaterfallPlotter:
         if self.emitter is None:
             log_post("-- No emitter used, passing.")
             return
-        spec, extent = self.emitter.spec_like(scan)
+        source = split_source_name(scan.source)
+        spec, extent = self.emitter.summed_spectrum(scan)
         outname = f"D{self.run_id}_S{scan.idx}_rfi" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
             log_post(f"-- File exists, continuing: {outname}")
@@ -606,9 +637,10 @@ class WaterfallPlotter:
         fig, ax = plt.subplots(figsize=(4, 2.5))
         ax.imshow(spec, cmap=CMAP, origin="upper", extent=extent,
                 aspect="auto", vmin=0.0, vmax=1.0)
+        self.overplot_emitter_by_sat(ax, scan)
         self.add_time_freq_labels(ax)
         ax.set_title(
-                f"{self.run_id} Field={scan.source}; Scan={scan.idx}; RFI",
+                f"{self.run_id} Field={source}; Scan={scan.idx}; RFI",
                 loc="left",
         )
         plt.tight_layout()
@@ -628,7 +660,7 @@ class WaterfallPlotter:
         outname : str, None
         """
         scan_id = dyna.scan_id
-        source = dyna.scan.source
+        source = dyna.source
         corr = dyna.corr
         outname = f"D{self.run_id}_S{scan_id}_{corr}" if outname is None else outname
         if (PATHS.plot/f"{outname}.pdf").exists() and self.keep_existing:
@@ -640,7 +672,7 @@ class WaterfallPlotter:
             spec = dyna.get_max_spec(pol=pol)
             ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
                     vmin=vmin, vmax=vmax)
-            self.overplot_emitter(ax, dyna.scan)
+            self.overplot_emitter_by_sat(ax, dyna.scan)
             ax.set_title(f"P{pol}", loc="right")
             self.add_time_freq_labels(ax)
         axes[0].set_title(
@@ -664,7 +696,7 @@ class WaterfallPlotter:
         outname : str, None
         """
         corr = dyna_group[0].corr
-        source = dyna_group[0].scan.source
+        source = dyna_group[0].source
         scan_ids = ",".join([d.scan.idx for d in dyna_group])
         n_spec = len(dyna_group)
         outname = f"D{self.run_id}_{band.upper()}_{corr}" if outname is None else outname
@@ -685,7 +717,7 @@ class WaterfallPlotter:
                 ax = plt.Subplot(fig, inner_grid[g_ix])
                 ax.imshow(spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
                         vmin=vmin, vmax=vmax)
-                self.overplot_emitter(ax, dyna.scan)
+                self.overplot_emitter_by_sat(ax, dyna.scan)
                 # Axis labeling plumbing
                 # FIXME This would be more elegant with the `fig.subfigures`
                 #       in matplotlib v3.4
@@ -733,7 +765,7 @@ class WaterfallPlotter:
         for b_ix, ax in zip(range(nspec), axiter):
             ax.imshow(spec[b_ix], cmap=CMAP, extent=dyna.extent, aspect="auto",
                     vmin=vmin, vmax=vmax)
-            self.overplot_emitter(ax, dyna.scan)
+            self.overplot_emitter_by_sat(ax, dyna.scan)
             ax.set_title(dyna.baseline_names[b_ix], loc="right",
                     fontdict={"fontsize": 8}, pad=2)
             self.add_time_freq_labels(ax)
@@ -774,7 +806,7 @@ class WaterfallPlotter:
             ant_spec /= np.nanmedian(ant_spec, axis=1, keepdims=True)
             ax.imshow(ant_spec, cmap=CMAP, extent=dyna.extent, aspect="auto",
                     vmin=vmin, vmax=vmax)
-            self.overplot_emitter(ax, dyna.scan)
+            self.overplot_emitter_by_sat(ax, dyna.scan)
             ax.set_title(ant_name, loc="right", fontdict={"fontsize": 8}, pad=2)
             self.add_time_freq_labels(ax)
         axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
@@ -782,35 +814,40 @@ class WaterfallPlotter:
         plt.tight_layout()
         savefig(f"{outname}.pdf")
 
-    def plot_all(self):
+    def plot_all(self, plot_rfi=True, plot_cross=True, plot_band=True,
+            plot_auto=True):
         assert self.eb.sdm_path.exists()
         log_post(f"-- Creating all waterfall plots for: {self.eb.name}")
         get_scans = self.eb.sdm.scans  # generator
         # RX/TX plots per scan
-        for scan in get_scans():
-            self.plot_rfi(scan)
+        if plot_rfi:
+            for scan in get_scans():
+                self.plot_rfi(scan)
         # Cross-correlation specific plots
-        for scan in get_scans():
-            dyna = DynamicSpectrum(scan, corr="cross")
-            self.plot_array_max(dyna)
-            for pol in (0, 1):
-                self.plot_cross_grid(dyna, pol=pol)
-            del dyna
+        if plot_cross:
+            for scan in get_scans():
+                dyna = DynamicSpectrum(scan, corr="cross")
+                self.plot_array_max(dyna)
+                for pol in (0, 1):
+                    self.plot_cross_grid(dyna, pol=pol)
+                del dyna
         # Cross-correlation group plots.
         # NOTE This is wasteful because it reads the BDF data again, although
         #      if a sufficient amount of RAM is present this should be in the
         #      filesystem buffer.
-        for band in list("abcd"):
-            group = get_scan_group(self.eb.sdm, band=band)
-            self.plot_array_max_groups(band, group)
-            del band
+        if plot_band:
+            for band in list("abcd"):
+                group = get_scan_group(self.eb.sdm, band=band)
+                self.plot_array_max_groups(band, group)
+                del band
         # Auto-correlation specific plots
-        for scan in get_scans():
-            dyna = DynamicSpectrum(scan, corr="auto")
-            self.plot_array_max(dyna)
-            for pol in (0, 1):
-                self.plot_auto_grid(dyna, pol=pol)
-            del dyna
+        if plot_auto:
+            for scan in get_scans():
+                dyna = DynamicSpectrum(scan, corr="auto")
+                self.plot_array_max(dyna)
+                for pol in (0, 1):
+                    self.plot_auto_grid(dyna, pol=pol)
+                del dyna
 
 
 def get_all_sdm_filenames():

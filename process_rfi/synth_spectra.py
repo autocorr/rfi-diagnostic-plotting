@@ -138,7 +138,17 @@ class Emitter:
     def time_max(self):
         return self.df.mjd_end_s.max()
 
-    def spec_like(self, scan):
+    def get_extent(self, scan):
+        freq = scan.freqs().ravel() * u.Hz.to("MHz")
+        time = scan.times() * u.day.to("s")
+        tmin = time.min()
+        tmax = time.max()
+        r_time = time - time.min()
+        extent = (freq.min(), freq.max(), r_time.min(), r_time.max())
+        F, T = np.meshgrid(freq, time)
+        return extent, F, T
+
+    def iter_spectra(self, scan):
         """
         Create a synthetic dynamic spectrum of the same time and frequency
         shape as the scan.
@@ -152,34 +162,38 @@ class Emitter:
         data : numpy.ndarray
         extent : list
         """
-        freq = scan.freqs().ravel() * u.Hz.to("MHz")
-        time = scan.times() * u.day.to("s")
-        tmin = time.min()
-        tmax = time.max()
-        r_time = time - time.min()
-        extent = (freq.min(), freq.max(), r_time.min(), r_time.max())
-        F, T = np.meshgrid(freq, time)
-        data = np.zeros_like(F)
+        extent, F, T = self.get_extent(scan)
+        tmin = T.min()
+        tmax = T.max()
         # Select channels with known transmission and filter by time.
         df = (self.df
                 .query("rx_chan.notnull() or tx_chan.notnull()", engine="python")
                 .query("mjd_start_s > @tmin and mjd_start_s < @tmax")
         )
-        if tmin > self.time_max or tmax < self.time_min or df.shape[0] == 0:
-            return data, extent
         # Fill in values in data array to create synthetic dynamic spectrum
-        for _, row in df.iterrows():
-            chan_cols = [
-                    ["rx_chan", "rx_flo", "rx_fhi"],
-                    ["tx_chan", "tx_flo", "tx_fhi"],
-            ]
-            for kind_col, f_lo_col, f_hi_col in chan_cols:
-                if pd.notnull(row[kind_col]):
-                    cols = [f_lo_col, f_hi_col, "mjd_start_s", "mjd_end_s"]
-                    f_lo, f_hi, t_lo, t_hi = row[cols]
-                    if (t_hi - t_lo) < 1.0:
-                        t_hi = t_lo + self.delta_t
-                    data[(F > f_lo) & (F < f_hi) & (T > t_lo) & (T < t_hi)] = 1.0
-        return data, extent
+        chan_cols = [
+                ["rx_chan", "rx_flo", "rx_fhi"],
+                ["tx_chan", "tx_flo", "tx_fhi"],
+        ]
+        for sat_id in df.sat_id.unique():
+            sat_df = df.query(f"sat_id == {sat_id}")
+            data = np.zeros_like(F)
+            for _, row in sat_df.iterrows():
+                for kind_col, f_lo_col, f_hi_col in chan_cols:
+                    if pd.notnull(row[kind_col]):
+                        cols = [f_lo_col, f_hi_col, "mjd_start_s", "mjd_end_s"]
+                        f_lo, f_hi, t_lo, t_hi = row[cols]
+                        if (t_hi - t_lo) < 1.0:
+                            t_hi = t_lo + self.delta_t
+                        data[(F > f_lo) & (F < f_hi) & (T > t_lo) & (T < t_hi)] = 1.0
+            yield data, int(sat_id)
+
+    def summed_spectrum(self, scan):
+        extent, F, T = self.get_extent(scan)
+        summed_data = np.zeros_like(F)
+        for data, sat_id in self.iter_spectra(scan):
+            summed_data += data
+        summed_data[summed_data > 0] = 1.0
+        return summed_data, extent
 
 
