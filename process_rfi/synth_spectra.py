@@ -111,6 +111,8 @@ def parse_excel_report(filen):
 
 
 class Emitter:
+    t_buffer = 15.0  # sec
+
     def __init__(self, df, delta_t=2.0):
         """
         Container-type for received/transmitted data packet timing data.
@@ -163,12 +165,12 @@ class Emitter:
         extent : list
         """
         extent, F, T = self.get_extent(scan)
-        tmin = T.min()
-        tmax = T.max()
+        t_lo = T.min() - self.t_buffer
+        t_hi = T.max() + self.t_buffer
         # Select channels with known transmission and filter by time.
         df = (self.df
                 .query("rx_chan.notnull() or tx_chan.notnull()", engine="python")
-                .query("mjd_start_s > @tmin and mjd_start_s < @tmax")
+                .query("mjd_start_s > @t_lo and mjd_start_s < @t_hi")
         )
         # Fill in values in data array to create synthetic dynamic spectrum
         chan_cols = [

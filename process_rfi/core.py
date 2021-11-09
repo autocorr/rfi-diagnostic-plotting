@@ -588,32 +588,30 @@ class WaterfallPlotter:
             return
         data, extent = self.emitter.summed_spectrum(scan)
         if data.sum() > 0:
-            ax.contour(data, origin="upper", extent=extent, levels=[0.5],
+            ax.contour(data, origin="lower", extent=extent, levels=[0.5],
                     colors="lime", linewidths=0.5, alpha=0.5)
 
-    def overplot_emitter_by_sat(self, ax, scan):
+    def overplot_emitter_by_sat(self, ax, scan, add_legend=True):
         if self.emitter is None:
             return
         extent, F, T = self.emitter.get_extent(scan)
-        for data, sat_id in self.emitter.iter_spectra(scan):
+        for i, (data, sat_id) in enumerate(self.emitter.iter_spectra(scan)):
             if data.sum() > 0:
-                r, g, b, _ = plt.cm.cool((sat_id % 20) / 20)
+                r, g, b, _ = plt.cm.Set1((i % 9) / 9)
                 color = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
-                ax.contour(data, origin="upper", extent=extent, levels=[0.5],
-                        colors=color, linewidths=0.5)
-                indices = np.argwhere(data == 1)
-                t_ix = int(indices[:,0].mean())
-                f_ix = indices[:,1].max()
-                t_txt = T[-t_ix, f_ix] - T.min()
-                f_txt = F[-t_ix, f_ix] + (F.max() - F.min()) * 0.01
-                txt = ax.annotate(fr"\textbf{{ {sat_id} }}", (f_txt, t_txt),
-                        xycoords="data", ha="left", va="center_baseline",
-                        color=color, fontsize=6)
-                fg = round(1 - (r + g + b) / 3)
-                txt.set_path_effects([
-                    path_effects.Stroke(linewidth=1, foreground=f"{fg}"),
-                    path_effects.Normal(),
-                ])
+                cs = ax.contour(data, origin="lower", extent=extent,
+                        levels=[0.5], colors="black", linewidths=1.5)
+                cs = ax.contour(data, origin="lower", extent=extent,
+                        levels=[0.5], colors=color, linewidths=0.5)
+                if add_legend:
+                    ax_pos = (0.02, 0.07 * (1 + i))  # (f, t)
+                    txt = ax.annotate(fr"\textbf{{ {sat_id} }}", ax_pos,
+                            xycoords="axes fraction", ha="left",
+                            va="center_baseline", color=color, fontsize=6)
+                    txt.set_path_effects([
+                            path_effects.Stroke(linewidth=2, foreground=f"black"),
+                            path_effects.Normal(),
+                    ])
 
     def plot_rfi(self, scan, outname=None):
         """
@@ -639,6 +637,8 @@ class WaterfallPlotter:
                 aspect="auto", vmin=0.0, vmax=1.0)
         self.overplot_emitter_by_sat(ax, scan)
         self.add_time_freq_labels(ax)
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
         ax.set_title(
                 f"{self.run_id} Field={source}; Scan={scan.idx}; RFI",
                 loc="left",
@@ -675,11 +675,13 @@ class WaterfallPlotter:
             self.overplot_emitter_by_sat(ax, dyna.scan)
             ax.set_title(f"P{pol}", loc="right")
             self.add_time_freq_labels(ax)
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
         axes[0].set_title(
                 f"{self.run_id} Field={source}; Scan={scan_id}; {corr.capitalize()}",
                 loc="left",
         )
-        plt.tight_layout()
+        plt.tight_layout(h_pad=0.3)
         savefig(f"{outname}.pdf")
 
     def plot_array_max_groups(self, band, dyna_group, vmin=2.0, vmax=3.0,
@@ -729,6 +731,8 @@ class WaterfallPlotter:
                     ax.set_xticks([])
                 if p_ix == 0:
                     ax.set_ylabel(r"$\mathrm{Time} \ [\mathrm{s}]$")
+                ax.xaxis.set_minor_locator(AutoMinorLocator())
+                ax.yaxis.set_minor_locator(AutoMinorLocator())
                 fig.add_subplot(ax)
         savefig(f"{outname}.pdf")
 
@@ -765,13 +769,17 @@ class WaterfallPlotter:
         for b_ix, ax in zip(range(nspec), axiter):
             ax.imshow(spec[b_ix], cmap=CMAP, extent=dyna.extent, aspect="auto",
                     vmin=vmin, vmax=vmax)
-            self.overplot_emitter_by_sat(ax, dyna.scan)
+            is_top_left_corner = ax.is_first_row() & ax.is_first_col()
+            self.overplot_emitter_by_sat(ax, dyna.scan,
+                    add_legend=is_top_left_corner)
             ax.set_title(dyna.baseline_names[b_ix], loc="right",
                     fontdict={"fontsize": 8}, pad=2)
             self.add_time_freq_labels(ax)
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
         for ax in axiter:
             ax.set_visible(False)
-        plt.tight_layout()
+        plt.tight_layout(h_pad=0.3)
         savefig(f"{outname}.pdf")
 
     def plot_auto_grid(self, dyna, pol=0, vmin=0.995, vmax=1.03,
@@ -809,6 +817,8 @@ class WaterfallPlotter:
             self.overplot_emitter_by_sat(ax, dyna.scan)
             ax.set_title(ant_name, loc="right", fontdict={"fontsize": 8}, pad=2)
             self.add_time_freq_labels(ax)
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
         axes[-1][-2].set_visible(False)  # only 14 antennas with autocorr
         axes[-1][-1].set_visible(False)
         plt.tight_layout()
