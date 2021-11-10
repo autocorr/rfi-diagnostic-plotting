@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 from dataclasses import dataclass
+from more_itertools import consecutive_groups
 
 import numpy as np
 import pandas as pd
 
 from astropy import units as u
+from astropy import coordinates
 from astropy.time import Time
 
 from process_rfi import PATHS
@@ -197,5 +199,39 @@ class Emitter:
             summed_data += data
         summed_data[summed_data > 0] = 1.0
         return summed_data, extent
+
+
+def group_contiguous_sat_ranges(df):
+    df = df.copy()
+    for sat_id in df.sat_id.unique():
+        sat_df = df.query("sat_id == @sat_id")
+        for ix_group in consecutive_groups(sat_df.index):
+            yield sat_df.loc[list(ix_group)]
+
+
+def calc_ha_dec(df):
+    df = df.copy()
+    df["has_altaz"] = (~df.sat_az.isna()).astype(int)
+    df["sat_id"] = df.sat_id.astype(int)
+    vla = coordinates.EarthLocation.of_site("VLA")
+    fk5 = coordinates.FK5()
+    #target = coordinates.SkyCoord.from_name("3C295")
+    for sat_df in group_contiguous_sat_ranges(df):
+        times = Time(sat_df.mjd_start, format="mjd", location=vla)
+        az  = sat_df.sat_az.interpolate(limit_direction="both").values * u.deg
+        alt = sat_df.sat_el.interpolate(limit_direction="both").values * u.deg
+        m_data = ~sat_df.sat_az.isna()
+        # Calculate Altitude/Azimuth coordinates
+        coords = coordinates.AltAz(
+                az=az, alt=alt, obstime=times, location=vla,
+        )
+        ix  = sat_df.index
+        ra  = coords.transform_to(fk5).ra.to(u.hourangle)
+        ha  = times.sidereal_time("apparent") - ra
+        dec = coords.transform_to(fk5).dec
+        df.loc[ix, "ha"]  = ha
+        df.loc[ix, "dec"] = dec
+        df.loc[ix, "utc_start"] = times.utc.iso
+    return df
 
 
