@@ -1,8 +1,14 @@
 casaplotms
 casatasks
 casatools
+dask
+distributed
 matplotlib
+more_itertools
 numpy
 odfpy
+pandas
+python-casacore
 scipy
 sdmpy
+xarray

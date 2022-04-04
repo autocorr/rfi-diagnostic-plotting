@@ -18,6 +18,14 @@ are stored. Then start CASA and run:
    from process_rfi.core import process_all_executions
    process_all_executions(overwrite=False)
 
+To create plots for a specific execution block:
+
+.. code-block:: python
+
+   eb = ExecutionBlock.from_run_id("0.7")
+   wf = WaterfallPlotter(eb)
+   wf.plot_all()
+
 
 License
 -------

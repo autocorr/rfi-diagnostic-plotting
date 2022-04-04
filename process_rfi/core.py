@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-import copy
 import shutil
 import multiprocessing
 from pathlib import Path
@@ -28,19 +27,8 @@ from casatasks import (
 from casatools import msmetadata
 from casaplotms import plotms
 
-from process_rfi import PATHS
+from process_rfi import (PATHS, CMAP, savefig)
 from process_rfi.synth_spectra import Emitter
-
-
-# Matplotlib configuration settings
-plt.rc("text", usetex=True)
-plt.rc("font", size=10, family="serif")
-plt.rc("xtick", direction="out")
-plt.rc("ytick", direction="out")
-plt.ioff()
-
-CMAP = copy.copy(plt.cm.get_cmap("magma"))
-CMAP.set_bad("0.5", 1.0)
 
 
 SCANS_BY_BAND = {
@@ -59,6 +47,7 @@ SDM_FROM_RUN = {
          "0.4": "TRFI0004_sb40302025_1_1.59487.62864469907",
          "0.5": "TRFI0004_sb40729015_1_1.59505.731108576394",
          "0.6": "TRFI0004_sb40729015_1_1.59508.7288583912",
+         "0.7": "TRFI0004_sb41267655_1_1.59617.919862986106",
          "1.1": "TRFI0004_sb40134306_2_1_20210915_1200.59472.49078583333",
          "1.2": "TRFI0004_sb40134306_2_1_20210915_1545.59472.6525390625",
          "1.3": "TRFI0004_sb40134306_2_1_20210915_1730.59472.725805462964",
@@ -79,6 +68,7 @@ LOCATIONS = {
          "0.4": "N/A",
          "0.5": "N/A",
          "0.6": "N/A",
+         "0.7": "N/A",
          "1.1": "VLA Site",
          "1.2": "Route 60",
          "1.3": "Magdalena",
@@ -134,16 +124,6 @@ def split_source_name(source):
     return source.split("=")[-1]
 
 
-def savefig(outname, dpi=300, relative=True, overwrite=True):
-    outpath = PATHS.plot / outname if relative else Path(outname)
-    if outpath.exists() and not overwrite:
-        print(f"Figure exists, continuing: {outpath}")
-    else:
-        print(f"Figure saved to: {outpath}")
-        plt.savefig(str(outpath), dpi=dpi)
-        plt.close("all")
-
-
 class MetaData:
     def __init__(self, vis):
         self.vis = Path(vis)
@@ -160,49 +140,6 @@ class MetaData:
         finally:
             msmd.close()
             msmd.done()
-
-
-def scan_data_to_xarray(scan, corr="cross"):
-    import xarray
-    if corr == "cross":
-        array_dim = "baseline"
-        array_coord = [f"{a1}@{a2}" for a1, a2 in scan.baselines]
-    elif corr == "auto":
-        array_dim = "antenna"
-        array_coord = scan.antennas
-    else:
-        raise ValueError(f"Invalid corr={corr}")
-    # shape -> (t, b/a, s, b, c, p); note b/a depends on corr
-    data = scan.bdf.get_data(type=corr)
-    s = data.shape
-    # shape -> (t, b/a, s*b*c, p); note b=bin has length 1
-    data = data.reshape(s[0], s[1], s[2]*s[3]*s[4], s[5])
-    # Get axis label information
-    times = scan.times()
-    times = (times - times[0]) * u.day.to("s")
-    freqs = scan.freqs().ravel() / 1e6  # MHz
-    pols = scan.bdf.spws[0].pols(type=corr)
-    xarr = xarray.DataArray(
-            data,
-            dims=(
-                    "time",
-                    array_dim,
-                    "frequency",
-                    "polarization",
-            ),
-            coords={
-                    "time": times,
-                    array_dim: array_coord,
-                    "frequency": freqs,
-                    "polarization": pols,
-            },
-            attrs=dict(
-                    time_unit="sec",
-                    frequency_unit="MHz",
-                    startMJD=times[0]*u.day.to("s"),
-            ),
-    )
-    return xarr
 
 
 class DynamicSpectrum:
